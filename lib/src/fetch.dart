@@ -4,10 +4,10 @@
 import 'dart:io';
 
 import 'package:code_assets/code_assets.dart';
+import 'package:crypto/crypto.dart';
 import 'package:hooks/hooks.dart';
 
 import 'release_config.dart';
-import 'sha256.dart';
 import 'targets.dart';
 
 /// Resolves or downloads the pre-built library for the target of [input] using
@@ -85,7 +85,9 @@ Future<Uri?> fetchPrebuiltLibrary(
 
   // 3. Check shared cache directory.
   if (await cachedFile.exists()) {
-    final cachedHash = sha256Hex(await cachedFile.readAsBytes());
+    final cachedHash = sha256
+        .convert(await cachedFile.readAsBytes())
+        .toString();
     if (cachedHash == expectedHash) {
       stdout.writeln(
         '$pkg: using cached prebuilt binary ($assetRemoteName).',
@@ -125,7 +127,7 @@ Future<Uri?> fetchPrebuiltLibrary(
     client.close();
   }
 
-  final actualHash = sha256Hex(bytes);
+  final actualHash = sha256.convert(bytes).toString();
 
   if (actualHash != expectedHash) {
     throw BuildError(

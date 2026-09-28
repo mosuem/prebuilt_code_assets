@@ -10,7 +10,6 @@ export 'src/coff_archive.dart';
 export 'src/fetch.dart';
 export 'src/prebuilt_library.dart';
 export 'src/release_config.dart';
-export 'src/sha256.dart';
 export 'src/source_builders.dart';
 export 'src/symbols_resolver.dart';
 export 'src/targets.dart';

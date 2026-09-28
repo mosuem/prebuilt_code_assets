@@ -4,8 +4,9 @@
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart';
+
 import '../release_config.dart';
-import '../sha256.dart';
 import '../targets.dart';
 
 /// CLI runner for `tool/regenerate_hashes.dart`.
@@ -54,7 +55,7 @@ Future<void> runRegenerateHashesCli(
             stdout.writeln('  Skipping missing local file: ${file.path}');
             continue;
           }
-          final fileHash = sha256Hex(await file.readAsBytes());
+          final fileHash = sha256.convert(await file.readAsBytes()).toString();
           fileHashes[assetName] = fileHash;
           stdout.writeln('  $assetName: $fileHash');
           continue;
@@ -72,7 +73,7 @@ Future<void> runRegenerateHashesCli(
           }
           final builder = BytesBuilder(copy: false);
           await response.forEach(builder.add);
-          final fileHash = sha256Hex(builder.takeBytes());
+          final fileHash = sha256.convert(builder.takeBytes()).toString();
           fileHashes[assetName] = fileHash;
           stdout.writeln('  $assetName: $fileHash');
         } catch (e) {

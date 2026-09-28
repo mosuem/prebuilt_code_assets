@@ -6,29 +6,13 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:code_assets/code_assets.dart';
+import 'package:crypto/crypto.dart';
 import 'package:hooks/hooks.dart';
 import 'package:prebuilt_code_assets/prebuilt_code_assets.dart';
 import 'package:record_use/record_use.dart' as record_use;
 import 'package:test/test.dart';
 
 void main() {
-  group('sha256Hex', () {
-    test('computes standard NIST FIPS 180-4 test vectors', () {
-      expect(
-        sha256Hex(const []),
-        'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
-      );
-      expect(
-        sha256Hex(utf8.encode('abc')),
-        'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
-      );
-      expect(
-        sha256Hex(utf8.encode('hello world')),
-        'b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9',
-      );
-    });
-  });
-
   group('targets', () {
     test('targetTripleFor disambiguates iOS device and simulator', () {
       expect(
@@ -223,8 +207,8 @@ void main() {
 
     setUp(() async {
       tempDir = await Directory.systemTemp.createTemp('prebuilt_lib_test_');
-      dylibHash = sha256Hex(fakeDylibBytes);
-      staticHash = sha256Hex(fakeStaticBytes);
+      dylibHash = sha256.convert(fakeDylibBytes).toString();
+      staticHash = sha256.convert(fakeStaticBytes).toString();
 
       server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
       serverBaseUri = Uri.parse('http://127.0.0.1:${server.port}');
