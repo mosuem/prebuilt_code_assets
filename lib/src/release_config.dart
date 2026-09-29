@@ -58,9 +58,9 @@ class PrebuiltReleaseConfig {
   ///   `os.staticlibFileName(staticLibraryName ?? libraryName)` when `static`
   ///   is `true`, and `os.dylibFileName(libraryName)` when `false`.
   /// - [resolveAssetName] returns
-  ///   `<assetPrefix ?? repo>-<targetTriple>-<libraryFileName>` (matching
-  ///   `package:boring`'s naming convention). Pass a custom [resolveAssetName]
-  ///   to use Rust-triple naming (like `package:icu4x` or `package:sigstore`).
+  ///   `<assetPrefix ?? repo>-<targetTriple>-<libraryFileName>` (see
+  ///   [targetTripleFor]). Pass a custom [resolveAssetName] for other release
+  ///   naming schemes (for example, Rust target triples).
   factory PrebuiltReleaseConfig.github({
     required String owner,
     required String repo,
@@ -97,42 +97,6 @@ class PrebuiltReleaseConfig {
       ),
       resolveAssetName: resolveAssetName ?? defaultAssetName,
       resolveLibraryFileName: libFileName,
-    );
-  }
-
-  /// Creates a [PrebuiltReleaseConfig] for Rust FFI packages (such as
-  /// `package:icu4x` and `package:sigstore`) whose `hashes.dart` maps
-  /// `(rustTarget, libraryType)` tuples to SHA-256 digests.
-  factory PrebuiltReleaseConfig.rustTargets({
-    required String owner,
-    required String repo,
-    required String version,
-    required Map<(String, String), String> targetHashes,
-    required String libraryName,
-    String tagPrefix = '',
-    String staticLibraryType = 'static',
-    String dynamicLibraryType = 'dynamic',
-    String Function(String rustTarget, String libraryType)? formatAssetName,
-  }) {
-    final assetFormatter =
-        formatAssetName ??
-        (rustTarget, libType) => 'lib$libraryName-$libType-$rustTarget';
-    final stringHashes = <String, String>{
-      for (final MapEntry(key: (rustTarget, libType), :value)
-          in targetHashes.entries)
-        assetFormatter(rustTarget, libType): value,
-    };
-    return PrebuiltReleaseConfig.github(
-      owner: owner,
-      repo: repo,
-      version: version,
-      tagPrefix: tagPrefix,
-      fileHashes: stringHashes,
-      libraryName: libraryName,
-      resolveAssetName: (os, arch, {iosSdk, required static}) => assetFormatter(
-        asRustTarget(os, arch, iosSdk: iosSdk),
-        static ? staticLibraryType : dynamicLibraryType,
-      ),
     );
   }
 }

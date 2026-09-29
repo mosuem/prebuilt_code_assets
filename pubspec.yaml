@@ -1,6 +1,6 @@
 name: prebuilt_code_assets
 description: Shared build and link hook infrastructure for Dart packages with prebuilt and source-built native code assets, tree-shaking link hooks, and release tooling.
-version: 0.1.2
+version: 0.2.0-wip
 
 
 repository: https://github.com/mosuem/prebuilt_code_assets

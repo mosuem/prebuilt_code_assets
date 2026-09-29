@@ -33,23 +33,16 @@ void main() {
       );
     });
 
-    test('asRustTarget maps all supported targets', () {
-      expect(
-        asRustTarget(
-          OS.iOS,
-          Architecture.arm64,
-          iosSdk: IOSSdk.iPhoneSimulator,
-        ),
-        'aarch64-apple-ios-sim',
-      );
-      expect(
-        asRustTarget(OS.iOS, Architecture.arm64, iosSdk: IOSSdk.iPhoneOS),
-        'aarch64-apple-ios',
-      );
-      for (final (os, arch, iosSdk) in supportedTargets) {
-        expect(asRustTarget(os, arch, iosSdk: iosSdk), isNotEmpty);
-      }
-    });
+    test(
+      'targetTripleFor produces unique identifiers for supportedTargets',
+      () {
+        final triples = [
+          for (final (os, arch, iosSdk) in supportedTargets)
+            targetTripleFor(os, arch, iosSdk: iosSdk),
+        ];
+        expect(triples.toSet(), hasLength(supportedTargets.length));
+      },
+    );
   });
 
   group('BuildOptions', () {

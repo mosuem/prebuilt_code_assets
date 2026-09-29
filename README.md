@@ -1,6 +1,6 @@
 # `package:prebuilt_code_assets`
 
-Shared build and link hook infrastructure for Dart packages that distribute prebuilt native code assets (via GitHub Releases or bundled `prebuilt/` directories), support compiling from source (`CMake`, `Cargo`, or `CBuilder`), and tree-shake static libraries in `hook/link.dart` via `@RecordUse`.
+Shared build and link hook infrastructure for Dart packages that distribute prebuilt native code assets (via GitHub Releases or bundled `prebuilt/` directories), support compiling from source through a toolchain-agnostic `buildFromSource` callback (e.g. `CBuilder` from `package:native_toolchain_c`, CMake, or Cargo), and tree-shake static libraries in `hook/link.dart` via `@RecordUse`.
 
 Modeled after `CLibrary` in `package:native_toolchain_c`, a single [`PrebuiltLibrary`](lib/src/prebuilt_library.dart) specification is defined once and shared across `hook/build.dart`, `hook/link.dart`, `tool/precompile_binaries.dart`, and `tool/regenerate_hashes.dart`.
 
@@ -48,7 +48,9 @@ final myLibrary = PrebuiltLibrary(
     libraryName: 'my_lib',
   ),
   buildFromSource: (input, output, {required static, checkoutPath}) async {
-    // Compile via CMakeBuilder, CargoSourceBuilder, or CBuilder...
+    // Compile with your toolchain (e.g. `CBuilder`, CMake, or Cargo), add the
+    // sources you read to `output.dependencies`, and return the Uri of the
+    // built static (if `static`) or dynamic library.
   },
   usedSymbols: SymbolsResolvers.fromRecordUseMapping(
     const record_use.Library('package:my_package/src/bindings/bindings.g.dart'),

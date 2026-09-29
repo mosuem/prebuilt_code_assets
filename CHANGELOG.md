@@ -1,3 +1,12 @@
+## 0.2.0-wip
+
+- **Breaking:** Removed the Rust-specific APIs `CargoSourceBuilder`,
+  `asRustTarget`, `asRustTargetForConfig`, and
+  `PrebuiltReleaseConfig.rustTargets`. They encoded one project's toolchain
+  choices (pinned nightly, `-Zbuild-std`, `no_std` targets, `rustup`
+  side effects) and release layout. Rust packages should implement
+  `buildFromSource` and a custom `resolveAssetName` themselves.
+
 ## 0.1.2
 
 - Removed `PrebuiltLibrary.fromCLibrary` and `native_toolchain_c` re-exports to keep the `PrebuiltLibrary` API surface minimal.
