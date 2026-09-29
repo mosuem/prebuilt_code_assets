@@ -80,6 +80,10 @@ class PrebuiltLibrary {
   /// Optimization level passed to `CLinker.library` in [link].
   final OptimizationLevel optimizationLevel;
 
+  /// Optional [CLibrary] from `package:native_toolchain_c` used for building
+  /// from source and linking when created via [PrebuiltLibrary.fromCLibrary].
+  final CLibrary? cLibrary;
+
   const PrebuiltLibrary({
     required this.name,
     this.packageName,
@@ -95,7 +99,56 @@ class PrebuiltLibrary {
     this.libraries,
     this.frameworks = const [],
     this.optimizationLevel = OptimizationLevel.o3,
-  });
+  }) : cLibrary = null;
+
+  /// Creates a [PrebuiltLibrary] backed by a [CLibrary] from
+  /// `package:native_toolchain_c`, avoiding duplication of [name],
+  /// [packageName], [assetName], [frameworks], [libraries],
+  /// [optimizationLevel], and C compiler/linker settings.
+  PrebuiltLibrary.fromCLibrary(
+    CLibrary this.cLibrary, {
+    String? assetName,
+    this.releaseConfig,
+    this.prebuiltDirectory,
+    SourceBuildCallback? buildFromSource,
+    this.fallbackToBuildOnFetchFailure = true,
+    this.envVarPrefix,
+    this.strictBuildOptions = false,
+    this.usedSymbols,
+    this.allKnownSymbols,
+    this.libraries,
+  }) : name = cLibrary.name,
+       packageName = cLibrary.packageName,
+       assetName = assetName ?? cLibrary.assetName ?? cLibrary.name,
+       frameworks = cLibrary.frameworks,
+       optimizationLevel = cLibrary.optimizationLevel,
+       buildFromSource =
+           buildFromSource ?? _sourceBuilderFromCLibrary(cLibrary);
+
+  static SourceBuildCallback _sourceBuilderFromCLibrary(CLibrary cLibrary) =>
+      (input, output, {required static, checkoutPath}) async {
+        final tempOutput = BuildOutputBuilder();
+        await cLibrary.build(
+          input: input,
+          output: tempOutput,
+          routing: const [ToAppBundle()],
+          linkModePreference: static
+              ? LinkModePreference.static
+              : LinkModePreference.dynamic,
+        );
+        final built = BuildOutput(tempOutput.json);
+        output.dependencies.addAll(built.dependencies);
+        final codeAsset = built.assets.code.firstOrNull;
+        final file = codeAsset?.file;
+        if (file == null) {
+          throw BuildError(
+            message:
+                'CLibrary(${cLibrary.name}).build did not emit a CodeAsset '
+                'with a file.',
+          );
+        }
+        return file;
+      };
 
   /// Runs the build hook (`hook/build.dart`) for this library.
   ///
@@ -355,13 +408,28 @@ class PrebuiltLibrary {
     }
 
     try {
+      final cLib = cLibrary;
+      final resolvedLibraries = <String>[
+        ...?cLib?.libraries,
+        ...?libraries?.call(input.config.code.targetOS),
+      ];
       await CLinker.library(
         name: name,
         packageName: pkg,
         assetName: assetName,
         sources: [staticLibraryFile.toFilePath()],
-        libraries: libraries?.call(input.config.code.targetOS) ?? const [],
+        includes: cLib?.includes ?? const [],
+        forcedIncludes: cLib?.forcedIncludes ?? const [],
         frameworks: frameworks,
+        libraries: resolvedLibraries,
+        libraryDirectories: cLib?.libraryDirectories ?? const ['.'],
+        flags: cLib?.flags ?? const [],
+
+        defines: cLib?.defines ?? const {},
+        pic: cLib?.pic ?? true,
+        std: cLib?.std,
+        language: cLib?.language ?? Language.c,
+        cppLinkStdLib: cLib?.cppLinkStdLib,
         optimizationLevel: optimizationLevel,
         linkerOptions: linkerOptions,
         linkModePreference: LinkModePreference.dynamic,
