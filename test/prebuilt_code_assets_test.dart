@@ -81,12 +81,46 @@ void main() {
       return builder.build();
     }
 
-    test('defaults to fetch mode', () {
+    test('defaults to fetch mode and treeshake: auto', () {
       final input = makeBuildInput({});
       final options = BuildOptions.fromDefines(input.userDefines);
       expect(options.buildMode, BuildMode.fetch);
+      expect(options.treeshake, TreeshakeMode.auto);
       expect(options.localPath, isNull);
       expect(options.checkoutPath, isNull);
+    });
+
+    test('parses treeshake on/off/auto and boolean values', () {
+      expect(
+        BuildOptions.fromDefines(
+          makeBuildInput({'treeshake': 'on'}).userDefines,
+        ).treeshake,
+        TreeshakeMode.on,
+      );
+      expect(
+        BuildOptions.fromDefines(
+          makeBuildInput({'treeshake': 'off'}).userDefines,
+        ).treeshake,
+        TreeshakeMode.off,
+      );
+      expect(
+        BuildOptions.fromDefines(
+          makeBuildInput({'treeshake': 'auto'}).userDefines,
+        ).treeshake,
+        TreeshakeMode.auto,
+      );
+      expect(
+        BuildOptions.fromDefines(
+          makeBuildInput({'treeshake': true}).userDefines,
+        ).treeshake,
+        TreeshakeMode.on,
+      );
+      expect(
+        BuildOptions.fromDefines(
+          makeBuildInput({'treeshake': false}).userDefines,
+        ).treeshake,
+        TreeshakeMode.off,
+      );
     });
 
     test('supports local_build boolean user-define', () {
@@ -103,24 +137,39 @@ void main() {
         envVarPrefix: 'EXAMPLE',
         environment: {
           'EXAMPLE_BUILD_MODE': 'checkout',
+          'EXAMPLE_TREESHAKE': 'off',
           'EXAMPLE_CHECKOUT_PATH': '/tmp/my_checkout',
         },
       );
       expect(options.buildMode, BuildMode.checkout);
+      expect(options.treeshake, TreeshakeMode.off);
       expect(options.checkoutPath?.toFilePath(), '/tmp/my_checkout/');
     });
 
-    test('throws BuildError in strict mode on unknown buildMode', () {
-      final input = makeBuildInput({'buildMode': 'invalid_mode'});
-      expect(
-        () => BuildOptions.fromDefines(
-          input.userDefines,
-          packageName: 'example_pkg',
-          strict: true,
-        ),
-        throwsA(isA<BuildError>()),
-      );
-    });
+    test(
+      'throws BuildError in strict mode on unknown buildMode or treeshake',
+      () {
+        final badMode = makeBuildInput({'buildMode': 'invalid_mode'});
+        expect(
+          () => BuildOptions.fromDefines(
+            badMode.userDefines,
+            packageName: 'example_pkg',
+            strict: true,
+          ),
+          throwsA(isA<BuildError>()),
+        );
+
+        final badTreeshake = makeBuildInput({'treeshake': 'invalid_treeshake'});
+        expect(
+          () => BuildOptions.fromDefines(
+            badTreeshake.userDefines,
+            packageName: 'example_pkg',
+            strict: true,
+          ),
+          throwsA(isA<BuildError>()),
+        );
+      },
+    );
   });
 
   group('COFF archive & Windows linker options', () {
@@ -338,6 +387,39 @@ void main() {
         final forLink = built.assets.encodedAssetsForLinking['demo'];
         expect(forLink, isNotNull);
         expect(forLink, hasLength(1));
+      },
+    );
+
+    test(
+      'bundles dynamic library directly when linkingEnabled but treeshake '
+      'is off',
+      () async {
+        final releaseConfig = makeReleaseConfig({
+          'demo-linux-x64-libdemo.so': dylibHash,
+          'demo-linux-x64-libdemo.a': staticHash,
+        });
+
+        final library = PrebuiltLibrary(
+          name: 'demo',
+          assetName: 'demo.dart',
+          releaseConfig: releaseConfig,
+        );
+
+        final input = createInput(
+          linkingEnabled: true,
+          defines: const {'treeshake': 'off'},
+        );
+        final output = BuildOutputBuilder();
+        await library.build(input: input, output: output);
+
+        final built = BuildOutput(output.json);
+        expect(
+          built.assets.code,
+          hasLength(1),
+          reason: 'Routed directly to app bundle when treeshake is off',
+        );
+        expect(built.assets.code.single.linkMode, isA<DynamicLoadingBundled>());
+        expect(built.assets.encodedAssetsForLinking['demo'], isNull);
       },
     );
 

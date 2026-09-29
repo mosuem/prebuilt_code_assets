@@ -15,10 +15,13 @@ Modeled after `CLibrary` in `package:native_toolchain_c`, a single [`PrebuiltLib
     - `buildMode: fetch` (default): Uses a pub-bundled `prebuilt/` binary if present, or downloads and caches the prebuilt binary in `outputDirectoryShared` (in an ABI-specific subdirectory preserving the canonical OS library filename for iOS/macOS XCFrameworks) and verifies its SHA-256 digest. Optionally falls back to `buildFromSource` on missing target or network failure.
     - `buildMode: build` / `buildMode: checkout`: Compiles from source using `buildFromSource` (optionally from `checkoutPath`).
     - `buildMode: local`: Bundles a pre-existing dynamic library from `localPath`.
-- **Tree-shaking link hook (`hook/link.dart`) with automatic fallback**:
+- **Tree-shaking link hook (`hook/link.dart`) with configurable `treeshake` mode**:
   - Resolves used symbols via `SymbolsResolvers.fromRecordUseMapping` (`ffigen`) or `SymbolsResolvers.fromMethodPrefix` (Diplomat).
   - Parses Windows COFF `.lib` archives to filter exported symbols and generates a `.def` module-definition file when `/INCLUDE:<symbol>` flags would exceed the Windows 32k command-line limit.
-  - Automatically falls back to fetching the prebuilt dynamic library when linking fails in `fetch` mode (e.g. when cross-compiling without a target C linker or Android NDK).
+  - Controlled via `hooks.user_defines.<package_name>.treeshake`:
+    - `auto` (default): Tries to tree-shake, and if linking fails in `fetch` mode (e.g. when no target C toolchain is installed or it is broken), prints a warning with the failure and falls back to bundling the prebuilt dynamic library.
+    - `on`: Always tries to tree-shake, and throws if linking fails.
+    - `off`: Never tree-shakes; bundles the dynamic library directly without running the C linker.
 - **Maintainer CLI runners (`package:prebuilt_code_assets/tools.dart`)**:
   - `runPrecompileBinariesCli` for `tool/precompile_binaries.dart`.
   - `runRegenerateHashesCli` for `tool/regenerate_hashes.dart` (supports both local artifact directories and remote GitHub Release URLs).
@@ -57,7 +60,6 @@ final myLibrary = PrebuiltLibrary(
 
 ### 2. Wire up `hook/build.dart` and `hook/link.dart`
 
-
 ```dart
 // hook/build.dart
 import 'package:hooks/hooks.dart';
@@ -84,7 +86,7 @@ Future<void> main(List<String> args) async {
 
 ### 3. Configuring `user_defines` in `pubspec.yaml`
 
-Consumers of your package configure how the native library is obtained under `hooks.user_defines.<package_name>` in their workspace or application `pubspec.yaml`:
+Consumers of your package configure how the native library is obtained and whether it is tree-shaken under `hooks.user_defines.<package_name>` in their workspace or application `pubspec.yaml`:
 
 ```yaml
 hooks:
@@ -92,6 +94,8 @@ hooks:
     my_package:
       # 'fetch' (default), 'build', 'checkout', or 'local'
       buildMode: fetch
+      # 'auto' (default), 'on', or 'off'
+      treeshake: auto
       # Path to a local source checkout (used when buildMode is 'build' or 'checkout')
       # checkoutPath: ../path/to/checkout
       # Path to a pre-existing dynamic library on disk (required when buildMode is 'local')
@@ -101,14 +105,17 @@ hooks:
 | Key | Type | Description |
 | :--- | :--- | :--- |
 | `buildMode` | `String` | `'fetch'` (default: use bundled `prebuilt/` or download from release URL), `'build'` / `'checkout'` (compile from source), or `'local'` (use a binary at `localPath`). |
+| `treeshake` | `String` | `'auto'` (default: try to tree-shake in `hook/link.dart` and fall back to the prebuilt dynamic library with a warning if linking fails), `'on'` (always tree-shake and throw if linking fails), or `'off'` (never tree-shake; always bundle the dynamic library directly). |
 | `local_build` | `bool` | Shorthand boolean alias (`local_build: true` sets `buildMode: build`). |
 | `checkoutPath` | `String` (path) | Optional path to a local source directory when `buildMode` is `'build'` or `'checkout'`. |
 | `localPath` | `String` (path) | Path to a pre-built dynamic library file when `buildMode` is `'local'`. |
 
 If `envVarPrefix` is set on `PrebuiltLibrary` (e.g. `envVarPrefix: 'MY_PKG'`), these options can also be overridden via environment variables:
 - `<PREFIX>_BUILD_MODE`
+- `<PREFIX>_TREESHAKE`
 - `<PREFIX>_CHECKOUT_PATH`
 - `<PREFIX>_LOCAL_PATH`
+
 
 
 

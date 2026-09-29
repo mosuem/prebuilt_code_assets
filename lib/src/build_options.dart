@@ -25,14 +25,32 @@ enum BuildMode {
 /// Backwards-compatible alias for [BuildMode].
 typedef BuildModeEnum = BuildMode;
 
+/// How `hook/link.dart` should handle tree-shaking of the native library.
+enum TreeshakeMode {
+  /// Always attempt to tree-shake in `hook/link.dart`, and throw if linking
+  /// fails.
+  on,
+
+  /// Never tree-shake; bundle the dynamic library directly without running the
+  /// C linker.
+  off,
+
+  /// Attempt to tree-shake in `hook/link.dart`, and fall back to bundling the
+  /// prebuilt dynamic library (printing a warning with the failure) if linking
+  /// fails.
+  auto,
+}
+
 /// Parsed user-defines configuration for native asset hooks.
 class BuildOptions {
   final BuildMode buildMode;
+  final TreeshakeMode treeshake;
   final Uri? localPath;
   final Uri? checkoutPath;
 
   const BuildOptions({
     required this.buildMode,
+    this.treeshake = TreeshakeMode.auto,
     this.localPath,
     this.checkoutPath,
   });
@@ -44,18 +62,20 @@ class BuildOptions {
   /// `dart-lang/native` examples (`local_build: true` maps to
   /// [BuildMode.build]).
   ///
-  /// When [strict] is `true`, throws a [BuildError] if `buildMode` is set to an
-  /// unrecognized string. When `false` (the default), falls back to
-  /// [defaultMode].
+  /// When [strict] is `true`, throws a [BuildError] if `buildMode` or
+  /// `treeshake` is set to an unrecognized value. When `false` (the default),
+  /// falls back to [defaultMode] / [defaultTreeshake].
   factory BuildOptions.fromDefines(
     HookInputUserDefines defines, {
     String? packageName,
     String? envVarPrefix,
     BuildMode defaultMode = BuildMode.fetch,
+    TreeshakeMode defaultTreeshake = TreeshakeMode.auto,
     bool strict = false,
     Map<String, String>? environment,
   }) {
     final env = environment ?? Platform.environment;
+    final pkg = packageName ?? '<package>';
 
     var modeString = defines['buildMode'] as String?;
     if (modeString == null && envVarPrefix != null) {
@@ -78,7 +98,6 @@ class BuildOptions {
       if (matched != null) {
         buildMode = matched;
       } else if (strict) {
-        final pkg = packageName ?? '<package>';
         throw BuildError(
           message:
               'Unknown buildMode "$modeString".\n\n'
@@ -91,6 +110,46 @@ class BuildOptions {
         );
       } else {
         buildMode = defaultMode;
+      }
+    }
+
+    final rawTreeshake = defines['treeshake'];
+    var treeshakeString = switch (rawTreeshake) {
+      final String s => s,
+      final bool b => b ? TreeshakeMode.on.name : TreeshakeMode.off.name,
+      _ => null,
+    };
+    if (treeshakeString == null && envVarPrefix != null) {
+      treeshakeString = env['${envVarPrefix}_TREESHAKE'];
+    }
+
+    final TreeshakeMode treeshake;
+    if (treeshakeString == null) {
+      treeshake = defaultTreeshake;
+    } else {
+      final normalized = switch (treeshakeString.toLowerCase()) {
+        'true' => TreeshakeMode.on.name,
+        'false' => TreeshakeMode.off.name,
+        final s => s,
+      };
+      final matched = TreeshakeMode.values
+          .where((e) => e.name == normalized)
+          .firstOrNull;
+      if (matched != null) {
+        treeshake = matched;
+      } else if (strict) {
+        throw BuildError(
+          message:
+              'Unknown treeshake mode "$treeshakeString".\n\n'
+              'Set `treeshake` to `on`, `off`, or `auto` in your '
+              'pubspec.yaml:\n'
+              'hooks:\n'
+              '  user_defines:\n'
+              '    $pkg:\n'
+              '      treeshake: auto\n',
+        );
+      } else {
+        treeshake = defaultTreeshake;
       }
     }
 
@@ -112,6 +171,7 @@ class BuildOptions {
 
     return BuildOptions(
       buildMode: buildMode,
+      treeshake: treeshake,
       localPath: localPath,
       checkoutPath: checkoutPath,
     );
@@ -124,6 +184,6 @@ class BuildOptions {
 
   @override
   String toString() =>
-      'BuildOptions(buildMode: $buildMode, '
+      'BuildOptions(buildMode: $buildMode, treeshake: $treeshake, '
       'localPath: $localPath, checkoutPath: $checkoutPath)';
 }

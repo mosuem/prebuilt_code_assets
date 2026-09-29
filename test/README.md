@@ -15,7 +15,9 @@ Run `dart test` to execute both the unit test suite ([`prebuilt_code_assets_test
    - Executes the compiled CLI binary (`Result: 42`) and inspects the bundled dynamic library via `DynamicLibrary.open` to verify:
      - `dylib.providesSymbol('math_add') == true` (used symbol kept)
      - `dylib.providesSymbol('math_unused_multiply') == false` (unused symbol stripped by the linker)
-5. **Link-hook fallback on linker failure**:
-   - Serves an un-linkable static archive so `CLinker.library` fails in `hook/link.dart`, and verifies that `PrebuiltLibrary.link` automatically falls back to downloading and bundling the prebuilt dynamic library (where both `math_add` and `math_unused_multiply` are present) and the built CLI binary still runs (`Result: 42`).
+5. **`treeshake: auto` / `on` / `off` in `hook/link.dart`**:
+   - Verifies `treeshake: off` bundles the prebuilt dynamic library directly without running the C linker (retaining both `math_add` and `math_unused_multiply`).
+   - Serves an un-linkable static archive so `CLinker.library` fails in `hook/link.dart`, verifying that `treeshake: auto` (default) prints a warning and falls back to the prebuilt dynamic library (`Result: 42`), whereas `treeshake: on` fails the build.
 6. **`hooks.user_defines` `buildMode: build` and `buildMode: local`**:
    - Verifies compiling from source in `hook/build.dart` (`buildMode: build`) and bundling a pre-existing dynamic library from disk (`buildMode: local` + `localPath`).
+

@@ -126,6 +126,7 @@ class PrebuiltLibrary {
 
     final static =
         buildOptions.buildMode != BuildMode.local &&
+        buildOptions.treeshake != TreeshakeMode.off &&
         (input.config.linkingEnabled ||
             input.config.code.linkModePreference == LinkModePreference.static);
 
@@ -307,9 +308,15 @@ class PrebuiltLibrary {
   /// library emitted by [build] into a dynamic library containing only the
   /// functions referenced in `input.recordedUses`.
   ///
-  /// If linking fails (e.g. because no cross-compilation C toolchain or Android
-  /// NDK is installed) and `buildMode` is [BuildMode.fetch], automatically
-  /// falls back to fetching and bundling the prebuilt dynamic library.
+  /// Behavior is controlled by `hooks.user_defines.<package>.treeshake`:
+  /// - [TreeshakeMode.auto] (default): Tries to tree-shake, and if linking
+  ///   fails in [BuildMode.fetch], prints a warning with the failure and falls
+  ///   back to bundling the prebuilt dynamic library.
+  /// - [TreeshakeMode.on]: Always tries to tree-shake, and rethrows if linking
+  ///   fails.
+  /// - [TreeshakeMode.off]: Never tree-shakes (handled in [build] by bundling
+  ///   the dynamic library directly, or by bundling the prebuilt dynamic
+  ///   library in [link] without invoking the linker).
   Future<void> link({
     required LinkInput input,
     required LinkOutputBuilder output,
@@ -326,6 +333,22 @@ class PrebuiltLibrary {
       // hook/build.dart bundled a dynamic library directly.
       return;
     }
+
+    final buildOptions = BuildOptions.fromDefines(
+      input.userDefines,
+      packageName: pkg,
+      envVarPrefix: envVarPrefix,
+      strict: strictBuildOptions,
+    );
+
+    if (buildOptions.treeshake == TreeshakeMode.off) {
+      stdout.writeln('$pkg: treeshake is off, skipping C linker.');
+      final bundled = await _bundlePrebuiltDynamicLibrary(input, output, pkg);
+      if (bundled) {
+        return;
+      }
+    }
+
     final staticLibraryFile = staticLibrary.file!;
 
     final recordedUses = input.recordedUses;
@@ -375,14 +398,19 @@ class PrebuiltLibrary {
               ..onRecord.listen((record) => stdout.writeln(record.message))),
       );
     } catch (e, s) {
-      // Tree-shaking only makes the library smaller, so a missing or broken C
-      // toolchain should not fail the build if there is an equivalent
-      // pre-built dynamic library. This also catches Error (such as ToolError).
       stdout.writeln('$pkg: linking failed: $e\n$s');
+      if (buildOptions.treeshake == TreeshakeMode.on) {
+        rethrow;
+      }
+      // Tree-shaking only makes the library smaller, so in `auto` mode a
+      // missing or broken C toolchain should not fail the build if there is an
+      // equivalent pre-built dynamic library. This also catches Error (such as
+      // ToolError).
       final fellBack = await _fallBackToPrebuiltLibrary(
         input,
         output,
         pkg: pkg,
+        buildMode: buildOptions.buildMode,
         error: e,
       );
       if (!fellBack) {
@@ -391,19 +419,44 @@ class PrebuiltLibrary {
     }
   }
 
+  Future<bool> _bundlePrebuiltDynamicLibrary(
+    LinkInput input,
+    LinkOutputBuilder output,
+    String pkg,
+  ) async {
+    final config = releaseConfig;
+    if (config == null) {
+      return false;
+    }
+    final library = await fetchPrebuiltLibrary(
+      input,
+      config,
+      static: false,
+      prebuiltDirectory: prebuiltDirectory,
+    );
+    if (library == null) {
+      return false;
+    }
+    output.assets.code.add(
+      CodeAsset(
+        package: pkg,
+        name: assetName,
+        linkMode: DynamicLoadingBundled(),
+        file: library,
+      ),
+    );
+    return true;
+  }
+
   Future<bool> _fallBackToPrebuiltLibrary(
     LinkInput input,
     LinkOutputBuilder output, {
     required String pkg,
+    required BuildMode buildMode,
     required Object error,
   }) async {
     final code = input.config.code;
     final target = '${code.targetOS}_${code.targetArchitecture}';
-    final buildMode = BuildOptions.fromDefines(
-      input.userDefines,
-      packageName: pkg,
-      envVarPrefix: envVarPrefix,
-    ).buildMode;
 
     if (buildMode != BuildMode.fetch) {
       stderr.writeln(

@@ -68,22 +68,29 @@ void main() {
 
   Future<void> writePubspec({
     String? buildMode,
+    String? treeshake,
     String? localPath,
     String? checkoutPath,
   }) async {
     final userDefines = StringBuffer();
-    if (buildMode != null || localPath != null || checkoutPath != null) {
+    if (buildMode != null ||
+        treeshake != null ||
+        localPath != null ||
+        checkoutPath != null) {
       userDefines.writeln('hooks:');
       userDefines.writeln('  user_defines:');
       userDefines.writeln('    math_pkg:');
       if (buildMode != null) {
-        userDefines.writeln('      buildMode: $buildMode');
+        userDefines.writeln('      buildMode: "$buildMode"');
+      }
+      if (treeshake != null) {
+        userDefines.writeln('      treeshake: "$treeshake"');
       }
       if (localPath != null) {
-        userDefines.writeln('      localPath: $localPath');
+        userDefines.writeln('      localPath: "$localPath"');
       }
       if (checkoutPath != null) {
-        userDefines.writeln('      checkoutPath: $checkoutPath');
+        userDefines.writeln('      checkoutPath: "$checkoutPath"');
       }
     }
 
@@ -407,13 +414,49 @@ void main() {
   );
 
   test(
-    'dart build cli falls back to prebuilt dynamic library when linking fails',
+    'dart build cli respects treeshake: auto, treeshake: on, and '
+    'treeshake: off',
     () async {
-      // Replace the static library with invalid archive bytes (and regenerate
-      // hashes.dart) so `hook/build.dart` succeeds in fetching the static
-      // asset, `CLinker.library` fails in `hook/link.dart`, and
-      // `PrebuiltLibrary.link` falls back to fetching the prebuilt dynamic
-      // library.
+      // 1. treeshake: off -> bundles dynamic library directly without
+      //    tree-shaking (both math_add and math_unused_multiply are present).
+      await writePubspec(buildMode: 'fetch', treeshake: 'off');
+      final offOutDir = await Directory.systemTemp.createTemp(
+        'math_pkg_cli_treeshake_off_',
+      );
+      addTearDown(() => offOutDir.delete(recursive: true));
+
+      final offBuild = await Process.run(
+        Platform.resolvedExecutable,
+        [
+          'build',
+          'cli',
+          '--target',
+          'bin/main.dart',
+          '--output',
+          offOutDir.path,
+        ],
+        workingDirectory: pkgDir.path,
+      );
+      expect(
+        offBuild.exitCode,
+        0,
+        reason: '${offBuild.stdout}\n${offBuild.stderr}',
+      );
+      final offDylibFile = File.fromUri(
+        offOutDir.uri.resolve('bundle/lib/$dylibFileName'),
+      );
+      final offDylib = DynamicLibrary.open(offDylibFile.path);
+      addTearDown(offDylib.close);
+      expect(offDylib.providesSymbol('math_add'), isTrue);
+      expect(
+        offDylib.providesSymbol('math_unused_multiply'),
+        isTrue,
+        reason: 'treeshake: off must not strip unused symbols',
+      );
+
+      // 2. Replace the static library with invalid archive bytes (and
+      //    regenerate hashes.dart) to test `treeshake: auto` vs `treeshake: on`
+      //    when linking fails.
       final staticFile = File.fromUri(
         artifactsDir.uri.resolve(staticAssetName),
       );
@@ -444,7 +487,8 @@ void main() {
         await dartToolHooks.delete(recursive: true);
       }
 
-      await writePubspec(buildMode: 'fetch');
+      // 2a. treeshake: auto (default) -> falls back to prebuilt dynamic library
+      await writePubspec(buildMode: 'fetch', treeshake: 'auto');
       final outDir = await Directory.systemTemp.createTemp(
         'math_pkg_cli_fallback_',
       );
@@ -479,6 +523,31 @@ void main() {
         reason:
             'Fallback prebuilt dynamic library contains all symbols '
             '(un-treeshaken)',
+      );
+
+      // 2b. treeshake: on -> throws when linking fails instead of falling back
+      await writePubspec(buildMode: 'fetch', treeshake: 'on');
+      final onOutDir = await Directory.systemTemp.createTemp(
+        'math_pkg_cli_treeshake_on_',
+      );
+      addTearDown(() => onOutDir.delete(recursive: true));
+
+      final onBuild = await Process.run(
+        Platform.resolvedExecutable,
+        [
+          'build',
+          'cli',
+          '--target',
+          'bin/main.dart',
+          '--output',
+          onOutDir.path,
+        ],
+        workingDirectory: pkgDir.path,
+      );
+      expect(
+        onBuild.exitCode,
+        isNonZero,
+        reason: 'treeshake: on must fail when linking fails',
       );
     },
   );
