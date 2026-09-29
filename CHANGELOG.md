@@ -1,3 +1,7 @@
+## 0.1.2
+
+- Removed `PrebuiltLibrary.fromCLibrary` and `native_toolchain_c` re-exports to keep the `PrebuiltLibrary` API surface minimal.
+
 ## 0.1.1
 
 - Added `PrebuiltLibrary.fromCLibrary` to reuse `CLibrary` metadata and compiler/linker configuration from `package:native_toolchain_c` without duplication.
@@ -5,6 +9,7 @@
 - Documented `hooks.user_defines.<package_name>` keys (`buildMode`, `local_build`, `checkoutPath`, `localPath`) and environment variable overrides in `README.md`.
 
 ## 0.1.0
+
 
 
 - Initial version:

@@ -5,10 +5,8 @@
 /// and source-built native code assets.
 library;
 
-export 'package:native_toolchain_c/native_toolchain_c.dart'
-    show CLibrary, Language, OptimizationLevel;
-
 export 'src/build_options.dart';
+
 export 'src/coff_archive.dart';
 export 'src/fetch.dart';
 export 'src/prebuilt_library.dart';

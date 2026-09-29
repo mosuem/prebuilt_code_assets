@@ -406,27 +406,5 @@ void main() {
       final built = BuildOutput(output.json);
       expect(built.assets.code, hasLength(1));
     });
-
-    test('PrebuiltLibrary.fromCLibrary inherits CLibrary metadata', () {
-      final cLib = CLibrary(
-        name: 'demo_c',
-        packageName: 'demo_pkg',
-        assetName: 'demo_c.dart',
-        sources: const ['src/demo.c'],
-        includes: const ['src/include'],
-        frameworks: const ['CoreFoundation'],
-        libraries: const ['m'],
-        optimizationLevel: OptimizationLevel.o2,
-      );
-
-      final prebuilt = PrebuiltLibrary.fromCLibrary(cLib);
-      expect(prebuilt.cLibrary, same(cLib));
-      expect(prebuilt.name, 'demo_c');
-      expect(prebuilt.packageName, 'demo_pkg');
-      expect(prebuilt.assetName, 'demo_c.dart');
-      expect(prebuilt.frameworks, const ['CoreFoundation']);
-      expect(prebuilt.optimizationLevel, OptimizationLevel.o2);
-      expect(prebuilt.buildFromSource, isNotNull);
-    });
   });
 }

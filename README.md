@@ -10,7 +10,6 @@ Modeled after `CLibrary` in `package:native_toolchain_c`, a single [`PrebuiltLib
   - `library.build(input: input, output: output)` for `hook/build.dart`.
   - `library.link(input: input, output: output)` for `hook/link.dart`.
   - `library.buildStandalone(...)` (via `BuildInputBuilder`) for standalone CI scripts.
-  - `PrebuiltLibrary.fromCLibrary(cLibrary, ...)` to wrap an existing `CLibrary` from `package:native_toolchain_c` without duplicating library metadata or compiler/linker configuration.
 - **Standardized `hooks.user_defines.<package_name>` build modes (`BuildOptions`)**:
   - Configured under `hooks.user_defines.<package_name>` in the consuming app's `pubspec.yaml` via the `buildMode` key (or `local_build: true`):
     - `buildMode: fetch` (default): Uses a pub-bundled `prebuilt/` binary if present, or downloads and caches the prebuilt binary in `outputDirectoryShared` (in an ABI-specific subdirectory preserving the canonical OS library filename for iOS/macOS XCFrameworks) and verifies its SHA-256 digest. Optionally falls back to `buildFromSource` on missing target or network failure.
@@ -56,34 +55,8 @@ final myLibrary = PrebuiltLibrary(
 );
 ```
 
-If your package builds C/C++ sources using `CLibrary` from `package:native_toolchain_c`, use `PrebuiltLibrary.fromCLibrary` to reuse its `name`, `packageName`, `assetName`, `sources`, `includes`, `libraries`, `frameworks`, `optimizationLevel`, and build/link behavior without duplication:
-
-```dart
-final myCLibrary = CLibrary(
-  name: 'my_lib',
-  assetName: 'my_package.dart',
-  sources: ['src/my_lib.c'],
-  includes: ['src/include'],
-);
-
-final myLibrary = PrebuiltLibrary.fromCLibrary(
-  myCLibrary,
-  releaseConfig: PrebuiltReleaseConfig.github(
-    owner: 'my-org',
-    repo: 'my_package',
-    version: version,
-    fileHashes: fileHashes,
-    libraryName: 'my_lib',
-  ),
-  usedSymbols: SymbolsResolvers.fromRecordUseMapping(
-    const record_use.Library('package:my_package/src/bindings/bindings.g.dart'),
-    recordUseMapping,
-  ),
-  allKnownSymbols: recordUseMapping.values.toSet(),
-);
-```
-
 ### 2. Wire up `hook/build.dart` and `hook/link.dart`
+
 
 ```dart
 // hook/build.dart
