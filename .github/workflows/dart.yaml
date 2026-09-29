@@ -1,0 +1,39 @@
+name: Dart
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '0 0 * * 0' # Weekly, to catch breakage from new SDK/dependency releases.
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+      - run: dart pub get
+      - run: dart format --output=none --set-exit-if-changed .
+      - run: dart analyze --fatal-infos
+
+  test:
+    # The integration test compiles C code, links it in hook/link.dart, and
+    # runs `dart build cli`, so it needs a C toolchain on every OS: gcc/clang
+    # on Linux, Xcode on macOS, and MSVC on Windows (all preinstalled on the
+    # GitHub-hosted runners).
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        sdk: ['3.10.0', stable]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: ${{ matrix.sdk }}
+      - run: dart pub get
+      - run: dart test

@@ -6,6 +6,50 @@
   choices (pinned nightly, `-Zbuild-std`, `no_std` targets, `rustup`
   side effects) and release layout. Rust packages should implement
   `buildFromSource` and a custom `resolveAssetName` themselves.
+- **Breaking:** Renamed `BuildMode` to `NativeBuildMode` so it no longer clashes
+  with `BuildMode` from `package:native_toolchain_c`. Removed the
+  `BuildModeEnum` alias, the `BuildMode.checkout` value (the user-define value
+  `checkout` is still accepted as an alias for `build`), and
+  `BuildOptions.isSourceBuild`.
+- **Breaking:** Removed `envVarPrefix` and the `<PREFIX>_*` environment
+  variable overrides. `hooks_runner` only passes an allowlist of environment
+  variables to hooks, so these never took effect in `dart` or `flutter`
+  builds.
+- **Breaking:** `strictBuildOptions` (and `BuildOptions.fromDefines(strict:)`)
+  now defaults to `true`. User-defines of the wrong type always throw a
+  `BuildError` instead of a `TypeError`.
+- **Breaking:** `fetchPrebuiltLibrary`'s `fallbackBuildModeName` is replaced by
+  `canBuildFromSource`; it also accepts `logger`, timeouts, and `maxAttempts`.
+- **Breaking:** Removed `package:prebuilt_code_assets/testing.dart` (ELF
+  helpers) and stopped exporting the COFF archive helpers, which are
+  implementation details of `PrebuiltLibrary.link`.
+- **Breaking:** `runPrecompileBinariesCli` throws a `UsageException`
+  (re-exported from `tools.dart`) instead of calling `exit`, and requires
+  `--ios-sdk` for iOS so asset names match what `fetch` requests.
+- **Breaking:** `runRegenerateHashesCli` no longer writes a license header by
+  default, fails without writing files if any asset can't be hashed (other
+  than missing files / HTTP 404; opt out with `failOnError: false`), and
+  requires `versionFilePath` to be in the same directory as `hashesFilePath`.
+- Fixed `build` routing a static library to the link hook when linking is
+  disabled but the link mode preference is static, which fails hook output
+  validation.
+- Fixed `link` dropping other assets routed to the package's link hook, and
+  matching assets whose ID merely ends with `assetName`.
+- Fixed the default logger mutating the global root logger and adding a new
+  listener on every `link` call. `build` now also accepts a `Logger`.
+- In `fetch` mode with `treeshake: auto`, `build` now bundles the prebuilt
+  dynamic library (with a warning) when no static library is released for the
+  target, instead of failing or building from source.
+- With `treeshake: off`, `link` never runs the C linker.
+- Downloads are streamed to disk while hashing, written atomically to the
+  shared cache, time out, and are retried on transient failures.
+- Bundled `prebuilt/` binaries are verified against `fileHashes` when a hash is
+  registered for them.
+- `buildStandalone` accepts `packageName` and only sets up the macOS code config
+  for macOS targets.
+- Malformed Windows `.lib` archives throw `FormatException` instead of
+  `RangeError`.
+- Added CI on Linux, macOS, and Windows, and an example.
 
 ## 0.1.2
 
@@ -18,8 +62,6 @@
 - Documented `hooks.user_defines.<package_name>` keys (`buildMode`, `local_build`, `checkoutPath`, `localPath`) and environment variable overrides in `README.md`.
 
 ## 0.1.0
-
-
 
 - Initial version:
   - `PrebuiltLibrary` specification for `hook/build.dart`, `hook/link.dart`, and standalone `BuildInputBuilder` builds.

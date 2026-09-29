@@ -4,6 +4,7 @@
 import 'dart:io';
 
 import 'package:args/args.dart';
+import 'package:args/command_runner.dart' show UsageException;
 import 'package:code_assets/code_assets.dart';
 
 import '../prebuilt_library.dart';
@@ -11,10 +12,14 @@ import '../targets.dart';
 
 /// CLI runner for `tool/precompile_binaries.dart` (or `tool/build.dart`).
 ///
-/// Parses `--target-os`, `--target-arch`, `--ios-sdk`, `--compile-type`, and
-/// `--out-dir`. For each requested compile type (`dynamic` and/or `static`),
-/// invokes [PrebuiltLibrary.buildStandalone] (or [customBuilder] if provided)
-/// and copies the built binary to `<outDir>/<releaseAssetName>`.
+/// Parses `--target-os`, `--target-arch`, `--ios-sdk` (required for iOS),
+/// `--compile-type`, and `--out-dir`. For each requested compile type
+/// (`dynamic` and/or `static`), invokes [PrebuiltLibrary.buildStandalone] (or
+/// [customBuilder] if provided) and copies the built binary to
+/// `<outDir>/<releaseAssetName>`.
+///
+/// Throws a [UsageException] for invalid arguments; `--help` prints the usage
+/// and returns.
 Future<void> runPrecompileBinariesCli(
   List<String> args, {
   required PrebuiltLibrary library,
@@ -30,6 +35,7 @@ Future<void> runPrecompileBinariesCli(
   customBuilder,
 }) async {
   final parser = ArgParser()
+    ..addFlag('help', abbr: 'h', negatable: false, help: 'Print this usage.')
     ..addOption(
       'target-os',
       abbr: 'o',
@@ -48,7 +54,7 @@ Future<void> runPrecompileBinariesCli(
       'ios-sdk',
       abbr: 'i',
       allowed: IOSSdk.values.map((s) => s.type),
-      help: 'Target iOS SDK (iphoneos or iphonesimulator).',
+      help: 'Target iOS SDK. Required when --target-os is ios.',
     )
     ..addOption(
       'compile-type',
@@ -67,30 +73,47 @@ Future<void> runPrecompileBinariesCli(
   final ArgResults results;
   try {
     results = parser.parse(args);
-  } catch (e) {
-    stderr.writeln('Error parsing arguments: $e\n');
-    stderr.writeln(parser.usage);
-    exit(1);
+  } on FormatException catch (e) {
+    throw UsageException(e.message, parser.usage);
+  }
+  if (results.flag('help')) {
+    stdout.writeln(parser.usage);
+    return;
   }
 
-  final targetOS = results['target-os'] == 'current'
+  final targetOS = results.option('target-os') == 'current'
       ? OS.current
-      : OS.fromString(results['target-os'] as String);
-  final targetArch = results['target-arch'] == 'current'
+      : OS.fromString(results.option('target-os')!);
+  final targetArch = results.option('target-arch') == 'current'
       ? Architecture.current
-      : Architecture.fromString(results['target-arch'] as String);
-  final iosSdkStr = results['ios-sdk'] as String?;
+      : Architecture.fromString(results.option('target-arch')!);
+  final iosSdkStr = results.option('ios-sdk');
   final iosSdk = iosSdkStr != null ? IOSSdk.fromString(iosSdkStr) : null;
+  // Release assets for iOS are named with the SDK (see [targetTripleFor]), so
+  // an unspecified SDK would produce names `fetch` never requests.
+  if (targetOS == OS.iOS && iosSdk == null) {
+    throw UsageException(
+      '--ios-sdk is required when --target-os is ios.',
+      parser.usage,
+    );
+  }
+  if (targetOS != OS.iOS && iosSdk != null) {
+    throw UsageException(
+      '--ios-sdk is only valid when --target-os is ios.',
+      parser.usage,
+    );
+  }
 
-  final compileType = results['compile-type'] as String;
-  final staticModes = switch (compileType) {
+  final staticModes = switch (results.option('compile-type')) {
     'dynamic' => const [false],
     'static' => const [true],
     _ => const [false, true],
   };
 
   final root = packageRoot ?? Directory.current.uri;
-  final outDir = Directory.fromUri(root.resolve('${results['out-dir']}/'));
+  final outDir = Directory.fromUri(
+    root.resolve('${results.option('out-dir')}/'),
+  );
   await outDir.create(recursive: true);
 
   final targetTriple = targetTripleFor(targetOS, targetArch, iosSdk: iosSdk);
@@ -116,16 +139,16 @@ Future<void> runPrecompileBinariesCli(
             checkoutPath: checkoutPath,
           );
 
-    final assetName = releaseConfig != null
-        ? releaseConfig.resolveAssetName(
-            targetOS,
-            targetArch,
-            iosSdk: iosSdk,
-            static: static,
-          )
-        : (static
-              ? targetOS.staticlibFileName(library.name)
-              : targetOS.dylibFileName(library.name));
+    final assetName =
+        releaseConfig?.resolveAssetName(
+          targetOS,
+          targetArch,
+          iosSdk: iosSdk,
+          static: static,
+        ) ??
+        (static
+            ? targetOS.staticlibFileName(library.name)
+            : targetOS.dylibFileName(library.name));
 
     final releaseAsset = File.fromUri(outDir.uri.resolve(assetName));
     await File.fromUri(builtUri).copy(releaseAsset.path);

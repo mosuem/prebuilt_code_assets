@@ -1,12 +1,15 @@
 // Copyright 2026 Moritz Sümmermann. Licensed under the Apache License,
 // Version 2.0. See the LICENSE file for details.
 
+import 'dart:async';
 import 'dart:io';
 
 import 'package:code_assets/code_assets.dart';
 import 'package:crypto/crypto.dart';
 import 'package:hooks/hooks.dart';
+import 'package:logging/logging.dart';
 
+import 'logging.dart';
 import 'release_config.dart';
 import 'targets.dart';
 
@@ -16,20 +19,33 @@ import 'targets.dart';
 /// library name (required for iOS/macOS XCFrameworks).
 ///
 /// If [prebuiltDirectory] is provided and a matching binary exists inside the
-/// package at `<packageRoot>/<prebuiltDirectory>/`, it is staged into the
-/// shared directory without making any network requests.
+/// package at `<packageRoot>/<prebuiltDirectory>/`, it is used without making
+/// any network requests. Bundled binaries are verified against
+/// [PrebuiltReleaseConfig.fileHashes] when a hash is registered for them, and
+/// trusted as part of the package otherwise.
+///
+/// Downloads are streamed to a temporary file while hashing, then atomically
+/// moved into the cache. Transient failures (network errors, timeouts, HTTP
+/// 5xx) are retried up to [maxAttempts] times.
 ///
 /// Returns `null` if no hash is registered in
-/// [PrebuiltReleaseConfig.fileHashes] or if downloading fails due to an HTTP
-/// or network error. Throws a [BuildError] if the downloaded file's SHA-256
-/// checksum does not match [PrebuiltReleaseConfig.fileHashes].
+/// [PrebuiltReleaseConfig.fileHashes], if the server responds with a
+/// non-retryable HTTP status, or if all download attempts fail. Throws a
+/// [BuildError] if a binary's SHA-256 checksum does not match.
+///
+/// [canBuildFromSource] only affects the hint in the checksum-mismatch error.
 Future<Uri?> fetchPrebuiltLibrary(
   HookInput input,
   PrebuiltReleaseConfig releaseConfig, {
   required bool static,
   String? prebuiltDirectory,
-  String fallbackBuildModeName = 'checkout',
+  bool canBuildFromSource = false,
+  Logger? logger,
+  Duration connectionTimeout = const Duration(seconds: 30),
+  Duration idleTimeout = const Duration(seconds: 60),
+  int maxAttempts = 3,
 }) async {
+  final log = logger ?? defaultLogger;
   final targetOS = input.config.code.targetOS;
   final targetArch = input.config.code.targetArchitecture;
   final iosSdk = targetOS == OS.iOS ? input.config.code.iOS.targetSdk : null;
@@ -50,8 +66,21 @@ Future<Uri?> fetchPrebuiltLibrary(
         .resolve('$pkg-${releaseConfig.version}/$assetRemoteName/')
         .resolve(fileName),
   );
+  final expectedHash = releaseConfig.fileHashes[assetRemoteName];
+  final hasHash = expectedHash != null && expectedHash.isNotEmpty;
 
-  // 1. Check for a pub-bundled prebuilt binary in `prebuiltDirectory` first.
+  Never mismatch(String actualHash, String source) => throw BuildError(
+    message:
+        'SHA-256 hash mismatch for prebuilt binary $assetRemoteName '
+        '($source).\n'
+        'Expected: $expectedHash\n'
+        'Actual:   $actualHash\n'
+        '${canBuildFromSource ? 'To build $pkg from source instead, set '
+                  '`buildMode: build` under `hooks.user_defines.$pkg` in '
+                  'your pubspec.yaml.' : ''}',
+  );
+
+  // 1. A pub-bundled prebuilt binary in `prebuiltDirectory`.
   if (prebuiltDirectory != null) {
     final triple = targetTripleFor(targetOS, targetArch, iosSdk: iosSdk);
     final candidates = [
@@ -63,87 +92,115 @@ Future<Uri?> fetchPrebuiltLibrary(
       ),
     ];
     for (final bundledFile in candidates) {
-      if (await bundledFile.exists()) {
-        stdout.writeln(
-          '$pkg: using bundled prebuilt binary (${bundledFile.path}).',
-        );
-        await cachedFile.parent.create(recursive: true);
-        await bundledFile.copy(cachedFile.path);
-        return cachedFile.uri;
+      if (!await bundledFile.exists()) continue;
+      if (hasHash) {
+        final actual = await _hashFile(bundledFile);
+        if (actual != expectedHash) mismatch(actual, bundledFile.path);
       }
-    }
-  }
-
-  // 2. Check registered SHA-256 hash.
-  final expectedHash = releaseConfig.fileHashes[assetRemoteName];
-  if (expectedHash == null || expectedHash.isEmpty) {
-    stdout.writeln(
-      '$pkg: no prebuilt binary hash registered for $assetRemoteName.',
-    );
-    return null;
-  }
-
-  // 3. Check shared cache directory.
-  if (await cachedFile.exists()) {
-    final cachedHash = sha256
-        .convert(await cachedFile.readAsBytes())
-        .toString();
-    if (cachedHash == expectedHash) {
-      stdout.writeln(
-        '$pkg: using cached prebuilt binary ($assetRemoteName).',
-      );
+      log.info('$pkg: using bundled prebuilt binary (${bundledFile.path}).');
+      await _atomicCopy(bundledFile, cachedFile);
       return cachedFile.uri;
     }
   }
 
-  // 4. Download from remote release URI.
+  // 2. A registered SHA-256 hash is required for anything downloaded.
+  if (!hasHash) {
+    log.info('$pkg: no prebuilt binary hash registered for $assetRemoteName.');
+    return null;
+  }
+
+  // 3. The shared cache.
+  if (await cachedFile.exists() &&
+      await _hashFile(cachedFile) == expectedHash) {
+    log.info('$pkg: using cached prebuilt binary ($assetRemoteName).');
+    return cachedFile.uri;
+  }
+
+  // 4. Download from the release.
   final binaryUrl = releaseConfig.resolveDownloadUri(
     releaseConfig.version,
     assetRemoteName,
   );
-
-  stdout.writeln('$pkg: fetching prebuilt binary from $binaryUrl...');
-
-  final client = HttpClient()..findProxy = HttpClient.findProxyFromEnvironment;
-  final List<int> bytes;
+  await cachedFile.parent.create(recursive: true);
+  final client = HttpClient()
+    ..findProxy = HttpClient.findProxyFromEnvironment
+    ..connectionTimeout = connectionTimeout;
   try {
-    final request = await client.getUrl(binaryUrl);
-    final response = await request.close();
-    if (response.statusCode != 200) {
-      stdout.writeln(
-        '$pkg: failed to download from $binaryUrl '
-        '(status: ${response.statusCode}).',
+    for (var attempt = 1; attempt <= maxAttempts; attempt++) {
+      log.info(
+        '$pkg: fetching prebuilt binary from $binaryUrl'
+        '${attempt > 1 ? ' (attempt $attempt of $maxAttempts)' : ''}...',
       );
-      await response.drain<void>();
-      return null;
+      final tempFile = File('${cachedFile.path}.download-$pid');
+      try {
+        final request = await client.getUrl(binaryUrl);
+        final response = await request.close();
+        if (response.statusCode != HttpStatus.ok) {
+          await response.drain<void>();
+          final retryable = response.statusCode >= 500;
+          log.info(
+            '$pkg: failed to download from $binaryUrl '
+            '(status: ${response.statusCode}).',
+          );
+          if (retryable && attempt < maxAttempts) {
+            await _backoff(attempt);
+            continue;
+          }
+          return null;
+        }
+        final digest = _DigestSink();
+        final hashInput = sha256.startChunkedConversion(digest);
+        final fileSink = tempFile.openWrite();
+        try {
+          await for (final chunk in response.timeout(idleTimeout)) {
+            hashInput.add(chunk);
+            fileSink.add(chunk);
+          }
+        } finally {
+          await fileSink.close();
+        }
+        hashInput.close();
+        final actualHash = digest.value.toString();
+        if (actualHash != expectedHash) {
+          await tempFile.delete();
+          mismatch(actualHash, binaryUrl.toString());
+        }
+        log.info('$pkg: verified SHA-256 checksum ($actualHash).');
+        await tempFile.rename(cachedFile.path);
+        return cachedFile.uri;
+      } on Exception catch (e) {
+        // IOException (network), TimeoutException, HttpException, ...
+        if (await tempFile.exists()) await tempFile.delete();
+        log.info('$pkg: error downloading prebuilt binary ($e).');
+        if (attempt < maxAttempts) await _backoff(attempt);
+      }
     }
-    bytes = await response.fold<List<int>>([], (a, b) => a..addAll(b));
-  } on IOException catch (e) {
-    stdout.writeln(
-      '$pkg: network error downloading prebuilt binary ($e).',
-    );
     return null;
   } finally {
-    client.close();
+    client.close(force: true);
   }
+}
 
-  final actualHash = sha256.convert(bytes).toString();
+Future<void> _backoff(int attempt) =>
+    Future<void>.delayed(Duration(milliseconds: 500 * attempt));
 
-  if (actualHash != expectedHash) {
-    throw BuildError(
-      message:
-          'SHA256 hash mismatch for prebuilt binary $assetRemoteName.\n'
-          'Expected: $expectedHash\n'
-          'Actual:   $actualHash\n'
-          'To build $pkg locally from source instead, set '
-          '`buildMode: $fallbackBuildModeName` in your pubspec.yaml under '
-          '`hooks.user_defines.$pkg`.',
-    );
-  }
+Future<String> _hashFile(File file) async =>
+    (await sha256.bind(file.openRead()).first).toString();
 
-  stdout.writeln('$pkg: verified SHA256 checksum ($actualHash).');
+/// Copies [source] to [destination] via a temporary file so concurrent hook
+/// invocations never observe a partially written [destination].
+Future<void> _atomicCopy(File source, File destination) async {
+  await destination.parent.create(recursive: true);
+  final temp = await source.copy('${destination.path}.copy-$pid');
+  await temp.rename(destination.path);
+}
 
-  await cachedFile.parent.create(recursive: true);
-  await cachedFile.writeAsBytes(bytes);
-  return cachedFile.uri;
+class _DigestSink implements Sink<Digest> {
+  late Digest value;
+
+  @override
+  void add(Digest data) => value = data;
+
+  @override
+  void close() {}
 }

@@ -22,9 +22,15 @@ Set<String> parseCoffArchiveSymbols(Uint8List archive) {
   final count = ByteData.sublistView(archive).getUint32(start, Endian.big);
   // The member offsets are followed by the NUL-terminated symbol names.
   var offset = start + 4 + 4 * count;
+  if (offset > archive.length) {
+    throw const FormatException('Truncated archive linker member.');
+  }
   final symbols = <String>{};
   for (var i = 0; i < count; i++) {
     final end = archive.indexOf(0, offset);
+    if (end == -1) {
+      throw const FormatException('Truncated archive symbol table.');
+    }
     symbols.add(String.fromCharCodes(archive, offset, end));
     offset = end + 1;
   }

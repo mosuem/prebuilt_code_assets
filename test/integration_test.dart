@@ -30,6 +30,10 @@ import 'package:prebuilt_code_assets/prebuilt_code_assets.dart';
 import 'package:prebuilt_code_assets/tools.dart';
 import 'package:test/test.dart';
 
+/// Single-quoted YAML scalar: backslashes (Windows paths) are literal, and
+/// single quotes are escaped by doubling them.
+String yamlString(String value) => "'${value.replaceAll("'", "''")}'";
+
 void main() {
   late Directory workspaceDir;
   late Directory pkgDir;
@@ -81,16 +85,16 @@ void main() {
       userDefines.writeln('  user_defines:');
       userDefines.writeln('    math_pkg:');
       if (buildMode != null) {
-        userDefines.writeln('      buildMode: "$buildMode"');
+        userDefines.writeln('      buildMode: ${yamlString(buildMode)}');
       }
       if (treeshake != null) {
-        userDefines.writeln('      treeshake: "$treeshake"');
+        userDefines.writeln('      treeshake: ${yamlString(treeshake)}');
       }
       if (localPath != null) {
-        userDefines.writeln('      localPath: "$localPath"');
+        userDefines.writeln('      localPath: ${yamlString(localPath)}');
       }
       if (checkoutPath != null) {
-        userDefines.writeln('      checkoutPath: "$checkoutPath"');
+        userDefines.writeln('      checkoutPath: ${yamlString(checkoutPath)}');
       }
     }
 
@@ -108,7 +112,7 @@ dependencies:
   meta: any
   native_toolchain_c: any
   prebuilt_code_assets:
-    path: ${repoRoot.toFilePath()}
+    path: ${yamlString(repoRoot.toFilePath())}
   record_use: any
 
 $userDefines
@@ -258,7 +262,6 @@ final mathLibrary = PrebuiltLibrary(
   name: 'math_lib',
   packageName: 'math_pkg',
   assetName: 'math_pkg.dart',
-  envVarPrefix: 'MATH_PKG',
   fallbackToBuildOnFetchFailure: false,
   releaseConfig: PrebuiltReleaseConfig(
     version: version,

@@ -6,11 +6,12 @@ import 'dart:io';
 import 'package:code_assets/code_assets.dart';
 import 'package:hooks/hooks.dart';
 import 'package:logging/logging.dart';
-import 'package:native_toolchain_c/native_toolchain_c.dart' hide BuildMode;
+import 'package:native_toolchain_c/native_toolchain_c.dart';
 
 import 'build_options.dart';
 import 'coff_archive.dart';
 import 'fetch.dart';
+import 'logging.dart';
 import 'release_config.dart';
 import 'source_builders.dart';
 import 'symbols_resolver.dart';
@@ -27,13 +28,13 @@ import 'symbols_resolver.dart';
 /// - `tool/precompile_binaries.dart` via [buildStandalone]
 class PrebuiltLibrary {
   /// The library stem name passed to `OS.dylibFileName` and `CLinker.library`
-  /// (e.g. `'bssl_dart'`, `'icu4x'`, `'sigstore_dart'`).
+  /// (e.g. `'my_lib'` for `libmy_lib.so`).
   final String name;
 
   /// Optional package name override. Defaults to `input.packageName`.
   final String? packageName;
 
-  /// The `@Native` asset ID suffix (e.g. `'boring.dart'` or
+  /// The `@Native` asset ID suffix (e.g. `'my_package.dart'` or
   /// `'src/bindings/lib.g.dart'`).
   final String assetName;
 
@@ -46,19 +47,16 @@ class PrebuiltLibrary {
   final String? prebuiltDirectory;
 
   /// Callback to compile the native library from source when `buildMode` is
-  /// `build`/`checkout` or when `fetch` falls back to building from source.
+  /// `build` or when `fetch` falls back to building from source.
   final SourceBuildCallback? buildFromSource;
 
-  /// Whether `fetch` mode should fall back to [buildFromSource] if no hash is
-  /// registered for the target or if downloading fails.
+  /// Whether `fetch` mode should fall back to [buildFromSource] if no prebuilt
+  /// binary is available for the target.
   final bool fallbackToBuildOnFetchFailure;
 
-  /// Optional environment variable prefix (e.g. `'SIGSTORE'`) for overriding
-  /// `buildMode`, `localPath`, and `checkoutPath`.
-  final String? envVarPrefix;
-
-  /// Whether unrecognized `buildMode` values in `hooks.user_defines` should
-  /// throw a [BuildError] instead of defaulting to [BuildMode.fetch].
+  /// Whether unrecognized `buildMode`/`treeshake` values in
+  /// `hooks.user_defines` throw a [BuildError] (the default) instead of
+  /// silently using the defaults.
   final bool strictBuildOptions;
 
   /// Extracts the native symbols used by the application from
@@ -74,7 +72,7 @@ class PrebuiltLibrary {
   /// a given target [OS].
   final List<String> Function(OS targetOS)? libraries;
 
-  /// Frameworks to link against in [link] (defaults to `const []`).
+  /// Frameworks to link against in [link] on Apple targets.
   final List<String> frameworks;
 
   /// Optimization level passed to `CLinker.library` in [link].
@@ -88,8 +86,7 @@ class PrebuiltLibrary {
     this.prebuiltDirectory,
     this.buildFromSource,
     this.fallbackToBuildOnFetchFailure = true,
-    this.envVarPrefix,
-    this.strictBuildOptions = false,
+    this.strictBuildOptions = true,
     this.usedSymbols,
     this.allKnownSymbols,
     this.libraries,
@@ -99,48 +96,49 @@ class PrebuiltLibrary {
 
   /// Runs the build hook (`hook/build.dart`) for this library.
   ///
-  /// When linking is enabled (`input.config.linkingEnabled`) and `buildMode` is
-  /// not [BuildMode.local], obtains a static library (`StaticLinking()`) and
-  /// routes it to `ToLinkHook(packageName)`. Otherwise obtains a dynamic
-  /// library (`DynamicLoadingBundled()`) and routes it to `ToAppBundle()`.
+  /// When linking is enabled (`input.config.linkingEnabled`), `buildMode` is
+  /// not [NativeBuildMode.local], and `treeshake` is not
+  /// [TreeshakeMode.off], obtains a static library and routes it to this
+  /// package's link hook. Otherwise obtains a dynamic library and bundles it
+  /// directly.
+  ///
+  /// In `fetch` mode, if no static library is available for the target and
+  /// `treeshake` is [TreeshakeMode.auto], falls back to bundling the prebuilt
+  /// dynamic library (with a warning) before trying [buildFromSource].
   Future<void> build({
     required BuildInput input,
     required BuildOutputBuilder output,
     List<Uri> additionalDependencies = const [],
+    Logger? logger,
   }) async {
+    final log = logger ?? defaultLogger;
     final pkg = packageName ?? input.packageName;
     if (!input.config.buildCodeAssets) {
-      stdout.writeln(
+      log.info(
         '$pkg: skipping native asset build (code assets not requested).',
       );
       return;
     }
 
-    final buildOptions = BuildOptions.fromDefines(
-      input.userDefines,
-      packageName: pkg,
-      envVarPrefix: envVarPrefix,
-      strict: strictBuildOptions,
-    );
-    stdout.writeln('$pkg: build options: $buildOptions');
+    final buildOptions = _buildOptions(input, pkg);
+    log.info('$pkg: $buildOptions');
 
     final static =
-        buildOptions.buildMode != BuildMode.local &&
-        buildOptions.treeshake != TreeshakeMode.off &&
-        (input.config.linkingEnabled ||
-            input.config.code.linkModePreference == LinkModePreference.static);
+        input.config.linkingEnabled &&
+        buildOptions.buildMode != NativeBuildMode.local &&
+        buildOptions.treeshake != TreeshakeMode.off;
 
     switch (buildOptions.buildMode) {
-      case BuildMode.fetch:
+      case NativeBuildMode.fetch:
         await _fetchOrFallback(
           input,
           output,
           pkg: pkg,
           static: static,
-          checkoutPath: buildOptions.checkoutPath,
+          options: buildOptions,
+          log: log,
         );
-      case BuildMode.build:
-      case BuildMode.checkout:
+      case NativeBuildMode.build:
         final builtUri = await _requireBuildFromSource(
           input,
           output,
@@ -149,7 +147,7 @@ class PrebuiltLibrary {
           checkoutPath: buildOptions.checkoutPath,
         );
         _addLibrary(input, output, pkg: pkg, library: builtUri, static: static);
-      case BuildMode.local:
+      case NativeBuildMode.local:
         await _useLocalBinary(
           input,
           output,
@@ -160,73 +158,94 @@ class PrebuiltLibrary {
 
     output.dependencies.addAll([
       input.packageRoot.resolve('pubspec.yaml'),
-      input.packageRoot.resolve('hook/build.dart'),
       ...additionalDependencies,
     ]);
   }
+
+  BuildOptions _buildOptions(HookInput input, String pkg) =>
+      BuildOptions.fromDefines(
+        input.userDefines,
+        packageName: pkg,
+        strict: strictBuildOptions,
+      );
 
   Future<void> _fetchOrFallback(
     BuildInput input,
     BuildOutputBuilder output, {
     required String pkg,
     required bool static,
-    required Uri? checkoutPath,
+    required BuildOptions options,
+    required Logger log,
   }) async {
     final config = releaseConfig;
-    if (config == null) {
-      if (buildFromSource != null) {
-        final builtUri = await buildFromSource!(
-          input,
-          output,
-          static: static,
-          checkoutPath: checkoutPath,
-        );
-        _addLibrary(input, output, pkg: pkg, library: builtUri, static: static);
+    if (config != null) {
+      final library = await _fetch(input, config, static: static, log: log);
+      if (library != null) {
+        _addLibrary(input, output, pkg: pkg, library: library, static: static);
         return;
       }
-      throw BuildError(
-        message:
-            '$pkg: neither `releaseConfig` nor `buildFromSource` is '
-            'configured on PrebuiltLibrary.',
-      );
+
+      // Tree-shaking only makes the library smaller, so in `auto` mode a
+      // missing static library should not prevent using the dynamic one.
+      if (static && options.treeshake == TreeshakeMode.auto) {
+        final dynamic = await _fetch(input, config, static: false, log: log);
+        if (dynamic != null) {
+          log.warning(
+            'Warning: package:$pkg has no pre-built static library for '
+            '${_target(input)} in the ${config.version} release, so it '
+            'bundles the pre-built dynamic library instead, which is not '
+            'tree-shaken and therefore larger.',
+          );
+          _addLibrary(
+            input,
+            output,
+            pkg: pkg,
+            library: dynamic,
+            static: false,
+          );
+          return;
+        }
+      }
     }
 
-    final cachedLibrary = await fetchPrebuiltLibrary(
-      input,
-      config,
-      static: static,
-      prebuiltDirectory: prebuiltDirectory,
-    );
-    if (cachedLibrary != null) {
-      _addLibrary(
-        input,
-        output,
-        pkg: pkg,
-        library: cachedLibrary,
-        static: static,
-      );
-      return;
-    }
-
-    if (fallbackToBuildOnFetchFailure && buildFromSource != null) {
-      stdout.writeln('$pkg: falling back to building from local source.');
+    if (buildFromSource != null &&
+        (config == null || fallbackToBuildOnFetchFailure)) {
+      if (config != null) {
+        log.info('$pkg: falling back to building from source.');
+      }
       final builtUri = await buildFromSource!(
         input,
         output,
         static: static,
-        checkoutPath: checkoutPath,
+        checkoutPath: options.checkoutPath,
       );
       _addLibrary(input, output, pkg: pkg, library: builtUri, static: static);
       return;
     }
 
-    final code = input.config.code;
     throw BuildError(
-      message:
-          '$pkg: failed to fetch prebuilt binary for '
-          '${code.targetOS}-${code.targetArchitecture} (static: $static).',
+      message: config == null
+          ? '$pkg: neither `releaseConfig` nor `buildFromSource` is '
+                'configured on PrebuiltLibrary.'
+          : '$pkg: failed to fetch a pre-built '
+                '${static ? 'static' : 'dynamic'} library for '
+                '${_target(input)}.',
     );
   }
+
+  Future<Uri?> _fetch(
+    HookInput input,
+    PrebuiltReleaseConfig config, {
+    required bool static,
+    required Logger log,
+  }) => fetchPrebuiltLibrary(
+    input,
+    config,
+    static: static,
+    prebuiltDirectory: prebuiltDirectory,
+    canBuildFromSource: buildFromSource != null,
+    logger: log,
+  );
 
   Future<Uri> _requireBuildFromSource(
     BuildInput input,
@@ -235,19 +254,15 @@ class PrebuiltLibrary {
     required bool static,
     required Uri? checkoutPath,
   }) async {
-    if (buildFromSource == null) {
+    final callback = buildFromSource;
+    if (callback == null) {
       throw BuildError(
         message:
-            '$pkg: buildMode requires building from source, but '
-            '`buildFromSource` is not configured.',
+            '$pkg: `buildMode: build` requires building from source, but '
+            'this package does not support building from source.',
       );
     }
-    return buildFromSource!(
-      input,
-      output,
-      static: static,
-      checkoutPath: checkoutPath,
-    );
+    return callback(input, output, static: static, checkoutPath: checkoutPath);
   }
 
   Future<void> _useLocalBinary(
@@ -308,45 +323,55 @@ class PrebuiltLibrary {
   /// library emitted by [build] into a dynamic library containing only the
   /// functions referenced in `input.recordedUses`.
   ///
+  /// All other assets sent to this link hook are forwarded unchanged.
+  ///
   /// Behavior is controlled by `hooks.user_defines.<package>.treeshake`:
   /// - [TreeshakeMode.auto] (default): Tries to tree-shake, and if linking
-  ///   fails in [BuildMode.fetch], prints a warning with the failure and falls
-  ///   back to bundling the prebuilt dynamic library.
+  ///   fails in [NativeBuildMode.fetch], prints a warning and falls back to
+  ///   bundling the prebuilt dynamic library.
   /// - [TreeshakeMode.on]: Always tries to tree-shake, and rethrows if linking
   ///   fails.
-  /// - [TreeshakeMode.off]: Never tree-shakes (handled in [build] by bundling
-  ///   the dynamic library directly, or by bundling the prebuilt dynamic
-  ///   library in [link] without invoking the linker).
+  /// - [TreeshakeMode.off]: Never tree-shakes. [build] then bundles the
+  ///   dynamic library directly; if a static library still reaches [link], the
+  ///   prebuilt dynamic library is bundled instead.
   Future<void> link({
     required LinkInput input,
     required LinkOutputBuilder output,
     Logger? logger,
   }) async {
+    final log = logger ?? defaultLogger;
     final pkg = packageName ?? input.packageName;
     final expectedId = 'package:$pkg/$assetName';
-    final staticLibrary = input.assets.code
-        .where(
-          (asset) => asset.id == expectedId || asset.id.endsWith(assetName),
-        )
-        .firstOrNull;
+
+    CodeAsset? staticLibrary;
+    for (final encoded in input.assets.encodedAssets) {
+      if (staticLibrary == null && encoded.isCodeAsset) {
+        final asset = CodeAsset.fromEncoded(encoded);
+        if (asset.id == expectedId && asset.linkMode is StaticLinking) {
+          staticLibrary = asset;
+          continue;
+        }
+      }
+      output.assets.addEncodedAsset(encoded);
+    }
     if (staticLibrary == null) {
       // hook/build.dart bundled a dynamic library directly.
       return;
     }
 
-    final buildOptions = BuildOptions.fromDefines(
-      input.userDefines,
-      packageName: pkg,
-      envVarPrefix: envVarPrefix,
-      strict: strictBuildOptions,
-    );
+    final buildOptions = _buildOptions(input, pkg);
 
     if (buildOptions.treeshake == TreeshakeMode.off) {
-      stdout.writeln('$pkg: treeshake is off, skipping C linker.');
-      final bundled = await _bundlePrebuiltDynamicLibrary(input, output, pkg);
-      if (bundled) {
+      log.info('$pkg: treeshake is off, skipping C linker.');
+      if (await _bundlePrebuiltDynamicLibrary(input, output, pkg, log)) {
         return;
       }
+      throw BuildError(
+        message:
+            '$pkg: treeshake is off, but no pre-built dynamic library is '
+            'available for ${_target(input)} to bundle instead of the static '
+            'library.',
+      );
     }
 
     final staticLibraryFile = staticLibrary.file!;
@@ -354,11 +379,11 @@ class PrebuiltLibrary {
     final recordedUses = input.recordedUses;
     final List<String>? symbols;
     if (recordedUses == null || usedSymbols == null) {
-      stdout.writeln('$pkg: no recorded uses, keeping all functions.');
+      log.info('$pkg: no recorded uses, keeping all functions.');
       symbols = null;
     } else {
       symbols = usedSymbols!(recordedUses);
-      stdout.writeln(
+      log.info(
         '$pkg: keeping the ${symbols.length} functions the application '
         'uses:\n  ${symbols.join('\n  ')}',
       );
@@ -388,17 +413,9 @@ class PrebuiltLibrary {
         optimizationLevel: optimizationLevel,
         linkerOptions: linkerOptions,
         linkModePreference: LinkModePreference.dynamic,
-      ).run(
-        input: input,
-        output: output,
-        logger:
-            logger ??
-            (Logger('')
-              ..level = Level.ALL
-              ..onRecord.listen((record) => stdout.writeln(record.message))),
-      );
+      ).run(input: input, output: output, logger: log);
     } catch (e, s) {
-      stdout.writeln('$pkg: linking failed: $e\n$s');
+      log.info('$pkg: linking failed: $e\n$s');
       if (buildOptions.treeshake == TreeshakeMode.on) {
         rethrow;
       }
@@ -412,6 +429,7 @@ class PrebuiltLibrary {
         pkg: pkg,
         buildMode: buildOptions.buildMode,
         error: e,
+        log: log,
       );
       if (!fellBack) {
         rethrow;
@@ -423,17 +441,13 @@ class PrebuiltLibrary {
     LinkInput input,
     LinkOutputBuilder output,
     String pkg,
+    Logger log,
   ) async {
     final config = releaseConfig;
     if (config == null) {
       return false;
     }
-    final library = await fetchPrebuiltLibrary(
-      input,
-      config,
-      static: false,
-      prebuiltDirectory: prebuiltDirectory,
-    );
+    final library = await _fetch(input, config, static: false, log: log);
     if (library == null) {
       return false;
     }
@@ -452,14 +466,14 @@ class PrebuiltLibrary {
     LinkInput input,
     LinkOutputBuilder output, {
     required String pkg,
-    required BuildMode buildMode,
+    required NativeBuildMode buildMode,
     required Object error,
+    required Logger log,
   }) async {
-    final code = input.config.code;
-    final target = '${code.targetOS}_${code.targetArchitecture}';
+    final target = _target(input);
 
-    if (buildMode != BuildMode.fetch) {
-      stderr.writeln(
+    if (buildMode != NativeBuildMode.fetch) {
+      log.severe(
         'package:$pkg could not link the static library built in the '
         '`${buildMode.name}` build mode for $target. Install a C toolchain '
         '(compiler and linker) for $target. Only the `fetch` build mode falls '
@@ -469,52 +483,40 @@ class PrebuiltLibrary {
       return false;
     }
 
-    final config = releaseConfig;
-    if (config == null) {
-      return false;
-    }
-
-    final library = await fetchPrebuiltLibrary(
-      input,
-      config,
-      static: false,
-      prebuiltDirectory: prebuiltDirectory,
-    );
-    if (library == null) {
-      return false;
-    }
-
     final reason = switch (error) {
       ProcessException(:final executable) =>
         'ProcessException: $executable failed',
       _ => error.toString().split('\n').first,
     };
-    stderr.writeln(
+    if (!await _bundlePrebuiltDynamicLibrary(input, output, pkg, log)) {
+      return false;
+    }
+    log.warning(
       'Warning: package:$pkg could not tree-shake its native library for '
       '$target, so it bundles the pre-built dynamic library of the $pkg '
-      '${config.version} release instead, which is not tree-shaken and '
-      'therefore larger. To enable tree-shaking, install a C toolchain '
+      '${releaseConfig!.version} release instead, which is not tree-shaken '
+      'and therefore larger. To enable tree-shaking, install a C toolchain '
       '(compiler and linker) for $target. Linking failed with: $reason',
     );
-    output.assets.code.add(
-      CodeAsset(
-        package: pkg,
-        name: assetName,
-        linkMode: DynamicLoadingBundled(),
-        file: library,
-      ),
-    );
     return true;
+  }
+
+  static String _target(HookInput input) {
+    final code = input.config.code;
+    return '${code.targetOS}_${code.targetArchitecture}';
   }
 
   /// Synthesizes a [BuildInput] via [BuildInputBuilder] (following the
   /// `download_asset/tool/build.dart` pattern in `package:hooks`) and invokes
   /// [buildFromSource] for standalone precompilation in CI scripts.
+  ///
+  /// [packageName] defaults to [PrebuiltLibrary.packageName], then to [name].
   Future<Uri> buildStandalone({
     required OS targetOS,
     required Architecture targetArchitecture,
     required bool static,
     IOSSdk? iOSSdk,
+    String? packageName,
     Uri? packageRoot,
     Uri? outputDirectory,
     Uri? outputDirectoryShared,
@@ -523,18 +525,20 @@ class PrebuiltLibrary {
     int iOSTargetVersion = 13,
     int macOSTargetVersion = 13,
   }) async {
-    if (buildFromSource == null) {
+    final callback = buildFromSource;
+    if (callback == null) {
       throw StateError(
         'Cannot call buildStandalone when `buildFromSource` is null.',
       );
     }
     final root = packageRoot ?? Directory.current.uri;
-    final pkg = packageName ?? name;
+    final pkg = packageName ?? this.packageName ?? name;
     final outDir =
         outputDirectory ??
         root.resolve(
           '.dart_tool/prebuilt_code_assets/'
-          '${targetOS.name}_${targetArchitecture.name}_${static ? "static" : "dynamic"}/',
+          '${targetOS.name}_${targetArchitecture.name}_'
+          '${static ? "static" : "dynamic"}/',
         );
     final sharedDir =
         outputDirectoryShared ??
@@ -559,24 +563,24 @@ class PrebuiltLibrary {
           linkModePreference: static
               ? LinkModePreference.static
               : LinkModePreference.dynamic,
-          android: targetOS != OS.android
-              ? null
-              : AndroidCodeConfig(targetNdkApi: androidTargetNdkApi),
-          iOS: targetOS != OS.iOS
-              ? null
-              : IOSCodeConfig(
+          android: targetOS == OS.android
+              ? AndroidCodeConfig(targetNdkApi: androidTargetNdkApi)
+              : null,
+          iOS: targetOS == OS.iOS
+              ? IOSCodeConfig(
                   targetSdk: iOSSdk ?? IOSSdk.iPhoneOS,
                   targetVersion: iOSTargetVersion,
-                ),
-          macOS: MacOSCodeConfig(targetVersion: macOSTargetVersion),
+                )
+              : null,
+          macOS: targetOS == OS.macOS
+              ? MacOSCodeConfig(targetVersion: macOSTargetVersion)
+              : null,
         ),
       );
 
-    final input = inputBuilder.build();
-    final output = BuildOutputBuilder();
-    return buildFromSource!(
-      input,
-      output,
+    return callback(
+      inputBuilder.build(),
+      BuildOutputBuilder(),
       static: static,
       checkoutPath: checkoutPath,
     );

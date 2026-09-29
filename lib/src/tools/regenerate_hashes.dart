@@ -2,7 +2,6 @@
 // Version 2.0. See the LICENSE file for details.
 
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 
@@ -11,11 +10,18 @@ import '../targets.dart';
 
 /// CLI runner for `tool/regenerate_hashes.dart`.
 ///
+/// Usage: `dart tool/regenerate_hashes.dart [<version> [<local-dir>]]`.
+///
 /// Computes SHA-256 digests for all [targets] and [staticModes] either from a
 /// local directory (`args[1]`, e.g. in CI before/during a release) or by
 /// downloading from the release URLs returned by [releaseConfigForVersion].
 /// Writes the resulting hashes to [hashesFilePath] (and optionally updates
-/// [versionFilePath]).
+/// [versionFilePath], which must be in the same directory).
+///
+/// Assets that don't exist (missing local file or HTTP 404) are skipped, since
+/// not every release contains every target. Any other error (network failure,
+/// unexpected HTTP status) aborts without writing files when [failOnError] is
+/// `true` (the default), so a release never ships an incomplete manifest.
 Future<void> runRegenerateHashesCli(
   List<String> args, {
   required String defaultVersion,
@@ -24,21 +30,34 @@ Future<void> runRegenerateHashesCli(
   String hashesFilePath = 'lib/src/hook_helpers/hashes.dart',
   String? versionFilePath = 'lib/src/hook_helpers/version.dart',
   String versionConstName = 'releaseVersion',
-  String licenseHeader =
-      '// Copyright 2026 Moritz Sümmermann. Licensed under the Apache License,\n'
-      '// Version 2.0. See the LICENSE file for details.\n',
+  String licenseHeader = '',
   List<TargetSpec> targets = supportedTargets,
   List<bool> staticModes = const [false, true],
+  bool failOnError = true,
 }) async {
+  final hashesFile = File(hashesFilePath);
+  final versionFile = versionFilePath == null ? null : File(versionFilePath);
+  if (versionFile != null &&
+      versionFile.absolute.parent.path != hashesFile.absolute.parent.path) {
+    throw ArgumentError.value(
+      versionFilePath,
+      'versionFilePath',
+      'must be in the same directory as hashesFilePath ($hashesFilePath)',
+    );
+  }
+
   final version = args.isNotEmpty ? args[0] : defaultVersion;
   final localDir = args.length > 1 ? Directory(args[1]) : null;
   final releaseConfig = releaseConfigForVersion(version);
   final httpClient = localDir == null
-      ? (HttpClient()..findProxy = HttpClient.findProxyFromEnvironment)
+      ? (HttpClient()
+          ..findProxy = HttpClient.findProxyFromEnvironment
+          ..connectionTimeout = const Duration(seconds: 30))
       : null;
 
   stdout.writeln('Checking hashes for version $version...');
   final fileHashes = <String, String>{};
+  final errors = <String>[];
 
   try {
     for (final (os, arch, iosSdk) in targets) {
@@ -50,12 +69,13 @@ Future<void> runRegenerateHashesCli(
           static: static,
         );
         if (localDir != null) {
-          final file = File('${localDir.path}/$assetName');
+          final file = File.fromUri(localDir.uri.resolve(assetName));
           if (!await file.exists()) {
             stdout.writeln('  Skipping missing local file: ${file.path}');
             continue;
           }
-          final fileHash = sha256.convert(await file.readAsBytes()).toString();
+          final fileHash = (await sha256.bind(file.openRead()).first)
+              .toString();
           fileHashes[assetName] = fileHash;
           stdout.writeln('  $assetName: $fileHash');
           continue;
@@ -66,18 +86,21 @@ Future<void> runRegenerateHashesCli(
         try {
           final request = await httpClient!.getUrl(uri);
           final response = await request.close();
-          if (response.statusCode != 200) {
-            stdout.writeln('  Skipping: status ${response.statusCode}');
+          if (response.statusCode == HttpStatus.notFound) {
+            stdout.writeln('  Skipping: not found');
             await response.drain<void>();
             continue;
           }
-          final builder = BytesBuilder(copy: false);
-          await response.forEach(builder.add);
-          final fileHash = sha256.convert(builder.takeBytes()).toString();
+          if (response.statusCode != HttpStatus.ok) {
+            await response.drain<void>();
+            errors.add('$uri: HTTP ${response.statusCode}');
+            continue;
+          }
+          final fileHash = (await sha256.bind(response).first).toString();
           fileHashes[assetName] = fileHash;
           stdout.writeln('  $assetName: $fileHash');
-        } catch (e) {
-          stdout.writeln('  Error fetching $uri: $e');
+        } on Exception catch (e) {
+          errors.add('$uri: $e');
         }
       }
     }
@@ -85,51 +108,76 @@ Future<void> runRegenerateHashesCli(
     httpClient?.close(force: true);
   }
 
-  final filesToFormat = <String>[hashesFilePath];
-
-  if (versionFilePath != null) {
-    await File(versionFilePath).writeAsString(
-      '$licenseHeader\n'
-      "const $versionConstName = '$version';\n",
-    );
-    filesToFormat.add(versionFilePath);
+  if (errors.isNotEmpty) {
+    final message =
+        'Failed to hash ${errors.length} asset(s):\n  ${errors.join('\n  ')}';
+    if (failOnError) {
+      throw StateError('$message\nNo files were written.');
+    }
+    stderr.writeln('Warning: $message');
   }
 
-  final versionFileBasename = versionFilePath?.split('/').last;
-  final buffer = StringBuffer();
+  final header = StringBuffer();
   if (licenseHeader.isNotEmpty) {
-    buffer.write(licenseHeader);
-    if (!licenseHeader.endsWith('\n')) buffer.writeln();
-    buffer.writeln();
+    header.write(licenseHeader);
+    if (!licenseHeader.endsWith('\n')) header.writeln();
+    header.writeln();
   }
-  buffer
+
+  final filesToFormat = <String>[hashesFilePath];
+  if (versionFile != null) {
+    await versionFile.writeAsString(
+      '$header'
+      'const $versionConstName = ${_dartString(version)};\n',
+    );
+    filesToFormat.add(versionFile.path);
+  }
+
+  final buffer = StringBuffer()
+    ..write(header)
     ..writeln('// coverage:ignore-file')
     ..writeln('// THIS FILE IS GENERATED BY `tool/regenerate_hashes.dart`.')
     ..writeln();
-  if (versionFileBasename != null) {
+  if (versionFile != null) {
     buffer
-      ..writeln("import '$versionFileBasename';")
+      ..writeln("import '${versionFile.uri.pathSegments.last}';")
       ..writeln()
       ..writeln('const version = $versionConstName;')
       ..writeln();
   } else {
     buffer
-      ..writeln("const version = '$version';")
+      ..writeln('const version = ${_dartString(version)};')
       ..writeln();
   }
   buffer
     ..writeln('/// Mapping from release asset name to SHA-256 hash.')
     ..writeln('const fileHashes = <String, String>{');
-
   for (final entry in fileHashes.entries) {
-    buffer.writeln("  '${entry.key}':");
-    buffer.writeln("      '${entry.value}',");
+    buffer.writeln('  ${_dartString(entry.key)}:');
+    buffer.writeln('      ${_dartString(entry.value)},');
   }
   buffer.writeln('};');
 
-  await File(hashesFilePath).writeAsString(buffer.toString());
-  await Process.run(Platform.resolvedExecutable, ['format', ...filesToFormat]);
-  stdout.writeln(
-    'Updated $hashesFilePath with ${fileHashes.length} hashes.',
-  );
+  await hashesFile.writeAsString(buffer.toString());
+  final format = await Process.run(Platform.resolvedExecutable, [
+    'format',
+    ...filesToFormat,
+  ]);
+  if (format.exitCode != 0) {
+    stderr.writeln(
+      'Warning: `dart format` failed (exit code ${format.exitCode}):\n'
+      '${format.stdout}${format.stderr}',
+    );
+  }
+  stdout.writeln('Updated $hashesFilePath with ${fileHashes.length} hashes.');
+}
+
+/// Returns [value] as a single-quoted Dart string literal.
+String _dartString(String value) {
+  final escaped = value
+      .replaceAll(r'\', r'\\')
+      .replaceAll("'", r"\'")
+      .replaceAll(r'$', r'\$')
+      .replaceAll('\n', r'\n');
+  return "'$escaped'";
 }

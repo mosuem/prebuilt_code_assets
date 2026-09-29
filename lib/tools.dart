@@ -5,5 +5,7 @@
 /// SHA-256 hash manifests.
 library;
 
+export 'package:args/command_runner.dart' show UsageException;
+
 export 'src/tools/precompile_binaries.dart';
 export 'src/tools/regenerate_hashes.dart';
