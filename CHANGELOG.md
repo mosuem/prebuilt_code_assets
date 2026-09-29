@@ -1,4 +1,11 @@
+## 0.1.1
+
+- Added `PrebuiltLibrary.fromCLibrary` to reuse `CLibrary` metadata and compiler/linker configuration from `package:native_toolchain_c` without duplication.
+- Re-exported `CLibrary`, `Language`, and `OptimizationLevel` from `package:prebuilt_code_assets/prebuilt_code_assets.dart`.
+- Documented `hooks.user_defines.<package_name>` keys (`buildMode`, `local_build`, `checkoutPath`, `localPath`) and environment variable overrides in `README.md`.
+
 ## 0.1.0
+
 
 - Initial version:
   - `PrebuiltLibrary` specification for `hook/build.dart`, `hook/link.dart`, and standalone `BuildInputBuilder` builds.
