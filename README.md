@@ -2,7 +2,7 @@
 
 Shared build and link hook infrastructure for Dart packages that distribute prebuilt native code assets (via GitHub Releases or bundled `prebuilt/` directories), support compiling from source through a toolchain-agnostic `buildFromSource` callback (e.g. `CBuilder` from `package:native_toolchain_c`, CMake, or Cargo), and tree-shake static libraries in `hook/link.dart` via `@RecordUse`.
 
-Modeled after `CLibrary` in `package:native_toolchain_c`, a single [`PrebuiltLibrary`](lib/src/prebuilt_library.dart) specification is defined once and shared across `hook/build.dart`, `hook/link.dart`, `tool/precompile_binaries.dart`, and `tool/regenerate_hashes.dart`.
+Modeled after `CLibrary` in `package:native_toolchain_c`, a single `PrebuiltLibrary` specification is defined once and shared across `hook/build.dart`, `hook/link.dart`, `tool/precompile_binaries.dart`, and `tool/regenerate_hashes.dart`.
 
 ## Features
 

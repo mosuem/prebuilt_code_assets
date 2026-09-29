@@ -2,21 +2,21 @@
 // for details. All rights reserved. Use of this source code is governed by a
 // BSD-style license that can be found in the LICENSE file.
 
-// End-to-end integration test that:
-// 1. Precompiles a real C library into static (.a/.lib) and dynamic
-//    (.so/.dylib/.dll) binaries via `PrebuiltLibrary.buildStandalone`.
-// 2. Generates `hashes.dart` via `runRegenerateHashesCli` and serves the
-//    binaries over a local HTTP server (simulating GitHub Releases).
-// 3. Creates a consumer Dart package using `PrebuiltLibrary` in
-//    `hook/build.dart` and `hook/link.dart` with `@RecordUse` + `@Native`.
-// 4. Runs `dart run` (fetch mode, dynamic library download + SHA-256 check).
-// 5. Runs `dart build cli` (fetch mode, static library download +
-//    `hook/link.dart` tree-shaking via `@RecordUse`, verifying unused symbols
-//    are stripped).
-// 6. Runs `dart build cli` with a failing linker to verify automatic fallback
-//    to the prebuilt dynamic library.
-// 7. Runs `dart run` in `buildMode: build` (compiling from source) and
-//    `buildMode: local` (bundling a local dynamic library).
+// End-to-end integration tests that:
+// 1. Precompile a real C library into static (.a/.lib) and dynamic
+//    (.so/.dylib/.dll) binaries via `PrebuiltLibrary.buildStandalone` (once,
+//    in `setUpAll`).
+// 2. Serve the binaries over a local HTTP server (simulating GitHub
+//    Releases), as a `good` artifact set and a `corrupt-static` artifact set
+//    whose static library is not a valid archive.
+// 3. Per test, create a fresh consumer package using `PrebuiltLibrary` in
+//    `hook/build.dart` and `hook/link.dart` with `@RecordUse` + `@Native`,
+//    with `hashes.dart` generated via `runRegenerateHashesCli`.
+// 4. Run `dart run` / `dart build cli` in the fetch, build and local build
+//    modes and with the different treeshake modes.
+//
+// Tests don't share consumer packages, hook caches, or artifacts that they
+// modify, so they can run in any order and on their own.
 @TestOn('linux || mac-os || windows')
 @Timeout(Duration(minutes: 5))
 library;
@@ -35,105 +35,7 @@ import 'package:test/test.dart';
 /// single quotes are escaped by doubling them.
 String yamlString(String value) => "'${value.replaceAll("'", "''")}'";
 
-void main() {
-  late Directory workspaceDir;
-  late Directory pkgDir;
-  late Directory artifactsDir;
-  late HttpServer server;
-  late Uri serverBaseUri;
-
-  final repoRoot = Directory.current.uri;
-  final currentOS = OS.current;
-  final currentArch = Architecture.current;
-  final triple = targetTripleFor(currentOS, currentArch);
-  final dylibFileName = currentOS.dylibFileName('math_lib');
-  final staticFileName = currentOS.staticlibFileName('math_lib');
-  final dylibAssetName = 'math_lib-$triple-$dylibFileName';
-  final staticAssetName = 'math_lib-$triple-$staticFileName';
-
-  PrebuiltReleaseConfig makeReleaseConfig(
-    String version, {
-    Map<String, String> hashes = const {},
-  }) => PrebuiltReleaseConfig(
-    version: version,
-    fileHashes: hashes,
-    resolveDownloadUri: (ver, assetName) =>
-        Uri.parse('$serverBaseUri/$ver/$assetName'),
-    resolveAssetName: (os, arch, {iosSdk, required static}) {
-      final t = targetTripleFor(os, arch, iosSdk: iosSdk);
-      final file = static
-          ? os.staticlibFileName('math_lib')
-          : os.dylibFileName('math_lib');
-      return 'math_lib-$t-$file';
-    },
-    resolveLibraryFileName: (os, {required static}) => static
-        ? os.staticlibFileName('math_lib')
-        : os.dylibFileName('math_lib'),
-  );
-
-  Future<void> writePubspec({
-    String? buildMode,
-    String? treeshake,
-    String? localPath,
-    String? checkoutPath,
-  }) async {
-    final userDefines = StringBuffer();
-    if (buildMode != null ||
-        treeshake != null ||
-        localPath != null ||
-        checkoutPath != null) {
-      userDefines.writeln('hooks:');
-      userDefines.writeln('  user_defines:');
-      userDefines.writeln('    math_pkg:');
-      if (buildMode != null) {
-        userDefines.writeln('      buildMode: ${yamlString(buildMode)}');
-      }
-      if (treeshake != null) {
-        userDefines.writeln('      treeshake: ${yamlString(treeshake)}');
-      }
-      if (localPath != null) {
-        userDefines.writeln('      localPath: ${yamlString(localPath)}');
-      }
-      if (checkoutPath != null) {
-        userDefines.writeln('      checkoutPath: ${yamlString(checkoutPath)}');
-      }
-    }
-
-    await File.fromUri(pkgDir.uri.resolve('pubspec.yaml')).writeAsString('''
-name: math_pkg
-version: 0.1.0
-publish_to: none
-
-environment:
-  sdk: ^3.10.0
-
-dependencies:
-  code_assets: any
-  hooks: any
-  meta: any
-  native_toolchain_c: any
-  prebuilt_code_assets:
-    path: ${yamlString(repoRoot.toFilePath())}
-  record_use: any
-
-$userDefines
-''');
-  }
-
-  setUpAll(() async {
-    workspaceDir = await Directory.systemTemp.createTemp(
-      'prebuilt_code_assets_e2e_',
-    );
-    pkgDir = Directory.fromUri(workspaceDir.uri.resolve('math_pkg/'));
-    artifactsDir = Directory.fromUri(workspaceDir.uri.resolve('artifacts/'));
-    await pkgDir.create(recursive: true);
-    await artifactsDir.create(recursive: true);
-
-    // 1. Write C source with one used function (`math_add`) and one unused
-    //    function (`math_unused_multiply`).
-    final srcDir = Directory.fromUri(pkgDir.uri.resolve('src/'));
-    await srcDir.create(recursive: true);
-    await File.fromUri(srcDir.uri.resolve('math_lib.c')).writeAsString('''
+const _cSource = '''
 #if defined(_WIN32)
 #define EXPORT __declspec(dllexport)
 #else
@@ -147,87 +49,9 @@ EXPORT int math_add(int a, int b) {
 EXPORT int math_unused_multiply(int a, int b) {
   return a * b;
 }
-''');
+''';
 
-    // 2. Precompile both static and dynamic libraries using
-    //    `PrebuiltLibrary.buildStandalone`.
-    final precompileSpec = PrebuiltLibrary(
-      name: 'math_lib',
-      packageName: 'math_pkg',
-      assetName: 'math_pkg.dart',
-      buildFromSource: (input, output, {required static, checkoutPath}) async {
-        final tempOutput = BuildOutputBuilder();
-        await CBuilder.library(
-          name: 'math_lib',
-          assetName: 'math_pkg.dart',
-          sources: const ['src/math_lib.c'],
-          linkModePreference: static
-              ? LinkModePreference.static
-              : LinkModePreference.dynamic,
-        ).run(input: input, output: tempOutput);
-        final built = BuildOutput(tempOutput.json);
-        return built.assets.code.single.file!;
-      },
-    );
-
-    final builtDylib = await precompileSpec.buildStandalone(
-      targetOS: currentOS,
-      targetArchitecture: currentArch,
-      static: false,
-      packageRoot: pkgDir.uri,
-    );
-    await File.fromUri(
-      builtDylib,
-    ).copy(artifactsDir.uri.resolve(dylibAssetName).toFilePath());
-
-    final builtStatic = await precompileSpec.buildStandalone(
-      targetOS: currentOS,
-      targetArchitecture: currentArch,
-      static: true,
-      packageRoot: pkgDir.uri,
-    );
-    await File.fromUri(
-      builtStatic,
-    ).copy(artifactsDir.uri.resolve(staticAssetName).toFilePath());
-
-    // 3. Serve the artifacts over a local HTTP server.
-    server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-    serverBaseUri = Uri.parse('http://127.0.0.1:${server.port}');
-    server.listen((request) async {
-      final name = request.uri.pathSegments.isEmpty
-          ? ''
-          : request.uri.pathSegments.last;
-      final file = File.fromUri(artifactsDir.uri.resolve(name));
-      if (file.existsSync()) {
-        request.response.statusCode = 200;
-        await request.response.addStream(file.openRead());
-      } else {
-        request.response.statusCode = 404;
-      }
-      await request.response.close();
-    });
-
-    // 4. Populate `math_pkg` files and generate `hashes.dart` using
-    //    `runRegenerateHashesCli`.
-    await writePubspec();
-
-    final libDir = Directory.fromUri(pkgDir.uri.resolve('lib/'));
-    final hookDir = Directory.fromUri(pkgDir.uri.resolve('hook/'));
-    final binDir = Directory.fromUri(pkgDir.uri.resolve('bin/'));
-    await libDir.create(recursive: true);
-    await hookDir.create(recursive: true);
-    await binDir.create(recursive: true);
-
-    await runRegenerateHashesCli(
-      ['0.1.0', artifactsDir.path],
-      defaultVersion: '0.1.0',
-      releaseConfigForVersion: makeReleaseConfig,
-      hashesFilePath: libDir.uri.resolve('hashes.dart').toFilePath(),
-      versionFilePath: null,
-      targets: [(currentOS, currentArch, null)],
-    );
-
-    await File.fromUri(libDir.uri.resolve('bindings.dart')).writeAsString('''
+const _bindings = '''
 @ffi.DefaultAsset('package:math_pkg/math_pkg.dart')
 library;
 
@@ -243,9 +67,86 @@ external int mathAdd(int a, int b);
   symbol: 'math_unused_multiply',
 )
 external int mathUnusedMultiply(int a, int b);
-''');
+''';
 
-    await File.fromUri(libDir.uri.resolve('library.dart')).writeAsString('''
+const _buildHook = '''
+import 'package:hooks/hooks.dart';
+import 'package:math_pkg/library.dart';
+
+Future<void> main(List<String> args) async {
+  await build(args, (input, output) async {
+    await mathLibrary.build(input: input, output: output);
+  });
+}
+''';
+
+const _linkHook = '''
+import 'package:hooks/hooks.dart';
+import 'package:math_pkg/library.dart';
+
+Future<void> main(List<String> args) async {
+  await link(args, (input, output) async {
+    await mathLibrary.link(input: input, output: output);
+  });
+}
+''';
+
+const _main = '''
+import 'package:math_pkg/bindings.dart';
+
+void main() {
+  print('Result: \${mathAdd(20, 22)}');
+}
+''';
+
+/// Artifact set whose binaries are all valid.
+const _good = 'good';
+
+/// Artifact set whose static library is not a valid archive, so that linking
+/// it fails.
+const _corruptStatic = 'corrupt-static';
+
+void main() {
+  late Directory workspaceDir;
+  late Directory artifactsDir;
+  late HttpServer server;
+  late Uri serverBaseUri;
+
+  final repoRoot = Directory.current.uri;
+  final currentOS = OS.current;
+  final currentArch = Architecture.current;
+  final triple = targetTripleFor(currentOS, currentArch);
+  final dylibFileName = currentOS.dylibFileName('math_lib');
+  final staticFileName = currentOS.staticlibFileName('math_lib');
+  final dylibAssetName = 'math_lib-$triple-$dylibFileName';
+  final staticAssetName = 'math_lib-$triple-$staticFileName';
+  final exeName = 'bin/main${Platform.isWindows ? '.exe' : ''}';
+
+  Directory artifactSetDir(String artifactSet) =>
+      Directory.fromUri(artifactsDir.uri.resolve('$artifactSet/'));
+
+  PrebuiltReleaseConfig makeReleaseConfig(
+    String artifactSet,
+    String version,
+  ) => PrebuiltReleaseConfig(
+    version: version,
+    fileHashes: const {},
+    resolveDownloadUri: (ver, assetName) =>
+        Uri.parse('$serverBaseUri/$artifactSet/$ver/$assetName'),
+    resolveAssetName: (os, arch, {iosSdk, required static}) {
+      final t = targetTripleFor(os, arch, iosSdk: iosSdk);
+      final file = static
+          ? os.staticlibFileName('math_lib')
+          : os.dylibFileName('math_lib');
+      return 'math_lib-$t-$file';
+    },
+    resolveLibraryFileName: (os, {required static}) => static
+        ? os.staticlibFileName('math_lib')
+        : os.dylibFileName('math_lib'),
+  );
+
+  String libraryDart(String artifactSet) =>
+      '''
 import 'package:code_assets/code_assets.dart';
 import 'package:hooks/hooks.dart';
 import 'package:native_toolchain_c/native_toolchain_c.dart';
@@ -268,7 +169,7 @@ final mathLibrary = PrebuiltLibrary(
     version: version,
     fileHashes: fileHashes,
     resolveDownloadUri: (ver, assetName) =>
-        Uri.parse('$serverBaseUri/\$ver/\$assetName'),
+        Uri.parse('$serverBaseUri/$artifactSet/\$ver/\$assetName'),
     resolveAssetName: (os, arch, {iosSdk, required static}) {
       final triple = targetTripleFor(os, arch, iosSdk: iosSdk);
       final file = static
@@ -299,43 +200,208 @@ final mathLibrary = PrebuiltLibrary(
   ),
   allKnownSymbols: recordUseMapping.values,
 );
+''';
+
+  String pubspec({String? buildMode, String? treeshake, String? localPath}) {
+    final defines = {
+      'buildMode': ?buildMode,
+      'treeshake': ?treeshake,
+      'localPath': ?localPath,
+    };
+    final buffer = StringBuffer('''
+name: math_pkg
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.10.0
+
+dependencies:
+  code_assets: any
+  hooks: any
+  meta: any
+  native_toolchain_c: any
+  prebuilt_code_assets:
+    path: ${yamlString(repoRoot.toFilePath())}
+  record_use: any
 ''');
+    if (defines.isNotEmpty) {
+      buffer
+        ..writeln()
+        ..writeln('hooks:')
+        ..writeln('  user_defines:')
+        ..writeln('    math_pkg:');
+      for (final MapEntry(:key, :value) in defines.entries) {
+        buffer.writeln('      $key: ${yamlString(value)}');
+      }
+    }
+    return buffer.toString();
+  }
 
-    await File.fromUri(hookDir.uri.resolve('build.dart')).writeAsString('''
-import 'package:hooks/hooks.dart';
-import 'package:math_pkg/library.dart';
+  Future<void> writeFile(Directory dir, String path, String contents) async {
+    final file = File.fromUri(dir.uri.resolve(path));
+    await file.parent.create(recursive: true);
+    await file.writeAsString(contents);
+  }
 
-Future<void> main(List<String> args) async {
-  await build(args, (input, output) async {
-    await mathLibrary.build(input: input, output: output);
-  });
-}
-''');
+  Future<ProcessResult> runDart(Directory dir, List<String> args) =>
+      Process.run(
+        Platform.resolvedExecutable,
+        args,
+        workingDirectory: dir.path,
+      );
 
-    await File.fromUri(hookDir.uri.resolve('link.dart')).writeAsString('''
-import 'package:hooks/hooks.dart';
-import 'package:math_pkg/library.dart';
-
-Future<void> main(List<String> args) async {
-  await link(args, (input, output) async {
-    await mathLibrary.link(input: input, output: output);
-  });
-}
-''');
-
-    await File.fromUri(binDir.uri.resolve('main.dart')).writeAsString('''
-import 'package:math_pkg/bindings.dart';
-
-void main() {
-  print('Result: \${mathAdd(20, 22)}');
-}
-''');
-
-    final pubGet = await Process.run(
-      Platform.resolvedExecutable,
-      ['pub', 'get'],
-      workingDirectory: pkgDir.path,
+  /// Creates a fresh consumer package that fetches from [artifactSet] with the
+  /// given user-defines.
+  Future<Directory> createPackage({
+    String artifactSet = _good,
+    String? buildMode,
+    String? treeshake,
+    String? localPath,
+  }) async {
+    final pkgDir = await workspaceDir.createTemp('math_pkg_');
+    await writeFile(
+      pkgDir,
+      'pubspec.yaml',
+      pubspec(buildMode: buildMode, treeshake: treeshake, localPath: localPath),
     );
+    await writeFile(pkgDir, 'src/math_lib.c', _cSource);
+    await writeFile(pkgDir, 'lib/bindings.dart', _bindings);
+    await writeFile(pkgDir, 'lib/library.dart', libraryDart(artifactSet));
+    await writeFile(pkgDir, 'hook/build.dart', _buildHook);
+    await writeFile(pkgDir, 'hook/link.dart', _linkHook);
+    await writeFile(pkgDir, 'bin/main.dart', _main);
+
+    await runRegenerateHashesCli(
+      ['0.1.0', artifactSetDir(artifactSet).path],
+      defaultVersion: '0.1.0',
+      releaseConfigForVersion: (version) =>
+          makeReleaseConfig(artifactSet, version),
+      hashesFilePath: pkgDir.uri.resolve('lib/hashes.dart').toFilePath(),
+      versionFilePath: null,
+      targets: [(currentOS, currentArch, null)],
+    );
+
+    // `setUpAll` already populated the pub cache.
+    final pubGet = await runDart(pkgDir, ['pub', 'get', '--offline']);
+    expect(pubGet.exitCode, 0, reason: '${pubGet.stdout}\n${pubGet.stderr}');
+    return pkgDir;
+  }
+
+  /// Runs `dart build cli` in [pkgDir] and returns the bundle directory.
+  Future<Uri> buildCli(Directory pkgDir) async {
+    final outDir = Directory.fromUri(pkgDir.uri.resolve('out/'));
+    final build = await runDart(pkgDir, [
+      'build',
+      'cli',
+      '--target',
+      'bin/main.dart',
+      '--output',
+      outDir.path,
+    ]);
+    expect(build.exitCode, 0, reason: '${build.stdout}\n${build.stderr}');
+    return outDir.uri.resolve('bundle/');
+  }
+
+  /// Runs the executable in [bundle] and opens its bundled dynamic library.
+  Future<DynamicLibrary> runBundle(Uri bundle) async {
+    final result = await Process.run(bundle.resolve(exeName).toFilePath(), []);
+    expect(result.exitCode, 0, reason: '${result.stdout}\n${result.stderr}');
+    expect(result.stdout, contains('Result: 42'));
+
+    final bundledDylib = File.fromUri(bundle.resolve('lib/$dylibFileName'));
+    expect(bundledDylib.existsSync(), isTrue);
+    final dylib = DynamicLibrary.open(bundledDylib.path);
+    addTearDown(dylib.close);
+    expect(dylib.providesSymbol('math_add'), isTrue);
+    return dylib;
+  }
+
+  setUpAll(() async {
+    workspaceDir = await Directory.systemTemp.createTemp(
+      'prebuilt_code_assets_e2e_',
+    );
+    artifactsDir = Directory.fromUri(workspaceDir.uri.resolve('artifacts/'));
+
+    // 1. Precompile both static and dynamic libraries using
+    //    `PrebuiltLibrary.buildStandalone`.
+    final precompileDir = Directory.fromUri(
+      workspaceDir.uri.resolve('precompile/'),
+    );
+    await writeFile(precompileDir, 'src/math_lib.c', _cSource);
+    final precompileSpec = PrebuiltLibrary(
+      name: 'math_lib',
+      packageName: 'math_pkg',
+      assetName: 'math_pkg.dart',
+      buildFromSource: (input, output, {required static, checkoutPath}) async {
+        final tempOutput = BuildOutputBuilder();
+        await CBuilder.library(
+          name: 'math_lib',
+          assetName: 'math_pkg.dart',
+          sources: const ['src/math_lib.c'],
+          linkModePreference: static
+              ? LinkModePreference.static
+              : LinkModePreference.dynamic,
+        ).run(input: input, output: tempOutput);
+        final built = BuildOutput(tempOutput.json);
+        return built.assets.code.single.file!;
+      },
+    );
+    final builtDylib = await precompileSpec.buildStandalone(
+      targetOS: currentOS,
+      targetArchitecture: currentArch,
+      static: false,
+      packageRoot: precompileDir.uri,
+    );
+    final builtStatic = await precompileSpec.buildStandalone(
+      targetOS: currentOS,
+      targetArchitecture: currentArch,
+      static: true,
+      packageRoot: precompileDir.uri,
+    );
+
+    // 2. Lay out the artifact sets.
+    for (final artifactSet in [_good, _corruptStatic]) {
+      await artifactSetDir(artifactSet).create(recursive: true);
+    }
+    final good = artifactSetDir(_good).uri;
+    final corrupt = artifactSetDir(_corruptStatic).uri;
+    await File.fromUri(
+      builtDylib,
+    ).copy(good.resolve(dylibAssetName).toFilePath());
+    await File.fromUri(
+      builtStatic,
+    ).copy(good.resolve(staticAssetName).toFilePath());
+    await File.fromUri(
+      builtDylib,
+    ).copy(corrupt.resolve(dylibAssetName).toFilePath());
+    await File.fromUri(
+      corrupt.resolve(staticAssetName),
+    ).writeAsString('not-a-valid-static-archive');
+
+    // 3. Serve `/<artifact set>/<version>/<asset>` over a local HTTP server.
+    server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    serverBaseUri = Uri.parse('http://127.0.0.1:${server.port}');
+    server.listen((request) async {
+      final segments = request.uri.pathSegments;
+      final file = segments.length == 3
+          ? File.fromUri(
+              artifactSetDir(segments.first).uri.resolve(segments.last),
+            )
+          : null;
+      if (file != null && file.existsSync()) {
+        request.response.statusCode = 200;
+        await request.response.addStream(file.openRead());
+      } else {
+        request.response.statusCode = 404;
+      }
+      await request.response.close();
+    });
+
+    // 4. Populate the pub cache, so that `createPackage` can resolve offline.
+    final warmUpDir = Directory.fromUri(workspaceDir.uri.resolve('warm_up/'));
+    await writeFile(warmUpDir, 'pubspec.yaml', pubspec());
+    final pubGet = await runDart(warmUpDir, ['pub', 'get']);
     expect(pubGet.exitCode, 0, reason: '${pubGet.stdout}\n${pubGet.stderr}');
   });
 
@@ -348,6 +414,7 @@ void main() {
     'runRegenerateHashesCli generates hashes.dart for static and dynamic '
     'binaries',
     () async {
+      final pkgDir = await createPackage();
       final hashesContent = await File.fromUri(
         pkgDir.uri.resolve('lib/hashes.dart'),
       ).readAsString();
@@ -359,12 +426,8 @@ void main() {
   test(
     'dart run downloads dynamic library, verifies hash, and calls FFI',
     () async {
-      await writePubspec(buildMode: 'fetch');
-      final result = await Process.run(
-        Platform.resolvedExecutable,
-        ['run', 'bin/main.dart'],
-        workingDirectory: pkgDir.path,
-      );
+      final pkgDir = await createPackage(buildMode: 'fetch');
+      final result = await runDart(pkgDir, ['run', 'bin/main.dart']);
       expect(result.exitCode, 0, reason: '${result.stdout}\n${result.stderr}');
       expect(result.stdout, contains('Result: 42'));
     },
@@ -374,39 +437,8 @@ void main() {
     'dart build cli downloads static library and tree-shakes unused symbols '
     'in hook/link.dart',
     () async {
-      await writePubspec(buildMode: 'fetch');
-      final outDir = await Directory.systemTemp.createTemp('math_pkg_cli_');
-      addTearDown(() => outDir.delete(recursive: true));
-
-      final build = await Process.run(
-        Platform.resolvedExecutable,
-        ['build', 'cli', '--target', 'bin/main.dart', '--output', outDir.path],
-        workingDirectory: pkgDir.path,
-      );
-      expect(build.exitCode, 0, reason: '${build.stdout}\n${build.stderr}');
-
-      final bundle = outDir.uri.resolve('bundle/');
-      final exe = bundle.resolve(
-        'bin/main${Platform.isWindows ? '.exe' : ''}',
-      );
-      final runResult = await Process.run(exe.toFilePath(), []);
-      expect(
-        runResult.exitCode,
-        0,
-        reason: '${runResult.stdout}\n${runResult.stderr}',
-      );
-      expect(runResult.stdout, contains('Result: 42'));
-
-      final bundledDylib = File.fromUri(bundle.resolve('lib/$dylibFileName'));
-      expect(bundledDylib.existsSync(), isTrue);
-
-      final dylib = DynamicLibrary.open(bundledDylib.path);
-      addTearDown(dylib.close);
-      expect(
-        dylib.providesSymbol('math_add'),
-        isTrue,
-        reason: 'Used symbol math_add must be kept by hook/link.dart',
-      );
+      final pkgDir = await createPackage(buildMode: 'fetch');
+      final dylib = await runBundle(await buildCli(pkgDir));
       expect(
         dylib.providesSymbol('math_unused_multiply'),
         isFalse,
@@ -418,109 +450,28 @@ void main() {
   );
 
   test(
-    'dart build cli respects treeshake: auto, treeshake: on, and '
-    'treeshake: off',
+    'treeshake: off bundles the dynamic library without tree-shaking',
     () async {
-      // 1. treeshake: off -> bundles dynamic library directly without
-      //    tree-shaking (both math_add and math_unused_multiply are present).
-      await writePubspec(buildMode: 'fetch', treeshake: 'off');
-      final offOutDir = await Directory.systemTemp.createTemp(
-        'math_pkg_cli_treeshake_off_',
-      );
-      addTearDown(() => offOutDir.delete(recursive: true));
-
-      final offBuild = await Process.run(
-        Platform.resolvedExecutable,
-        [
-          'build',
-          'cli',
-          '--target',
-          'bin/main.dart',
-          '--output',
-          offOutDir.path,
-        ],
-        workingDirectory: pkgDir.path,
-      );
+      final pkgDir = await createPackage(buildMode: 'fetch', treeshake: 'off');
+      final dylib = await runBundle(await buildCli(pkgDir));
       expect(
-        offBuild.exitCode,
-        0,
-        reason: '${offBuild.stdout}\n${offBuild.stderr}',
-      );
-      final offDylibFile = File.fromUri(
-        offOutDir.uri.resolve('bundle/lib/$dylibFileName'),
-      );
-      final offDylib = DynamicLibrary.open(offDylibFile.path);
-      addTearDown(offDylib.close);
-      expect(offDylib.providesSymbol('math_add'), isTrue);
-      expect(
-        offDylib.providesSymbol('math_unused_multiply'),
+        dylib.providesSymbol('math_unused_multiply'),
         isTrue,
         reason: 'treeshake: off must not strip unused symbols',
       );
+    },
+  );
 
-      // 2. Replace the static library with invalid archive bytes (and
-      //    regenerate hashes.dart) to test `treeshake: auto` vs `treeshake: on`
-      //    when linking fails.
-      final staticFile = File.fromUri(
-        artifactsDir.uri.resolve(staticAssetName),
+  test(
+    'treeshake: auto falls back to the prebuilt dynamic library when linking '
+    'fails',
+    () async {
+      final pkgDir = await createPackage(
+        artifactSet: _corruptStatic,
+        buildMode: 'fetch',
+        treeshake: 'auto',
       );
-      final originalStaticBytes = await staticFile.readAsBytes();
-      final hashesFile = File.fromUri(pkgDir.uri.resolve('lib/hashes.dart'));
-      final originalHashesContent = await hashesFile.readAsString();
-      addTearDown(() async {
-        await staticFile.writeAsBytes(originalStaticBytes);
-        await hashesFile.writeAsString(originalHashesContent);
-      });
-
-      await staticFile.writeAsString('not-a-valid-static-archive');
-      await runRegenerateHashesCli(
-        ['0.1.0', artifactsDir.path],
-        defaultVersion: '0.1.0',
-        releaseConfigForVersion: makeReleaseConfig,
-        hashesFilePath: hashesFile.path,
-        versionFilePath: null,
-        targets: [(currentOS, currentArch, null)],
-      );
-
-      // Clear cached static binary in .dart_tool/hooks_runner/shared so the
-      // corrupted static archive is fetched.
-      final dartToolHooks = Directory.fromUri(
-        pkgDir.uri.resolve('.dart_tool/hooks_runner/'),
-      );
-      if (dartToolHooks.existsSync()) {
-        await dartToolHooks.delete(recursive: true);
-      }
-
-      // 2a. treeshake: auto (default) -> falls back to prebuilt dynamic library
-      await writePubspec(buildMode: 'fetch', treeshake: 'auto');
-      final outDir = await Directory.systemTemp.createTemp(
-        'math_pkg_cli_fallback_',
-      );
-      addTearDown(() => outDir.delete(recursive: true));
-
-      final build = await Process.run(
-        Platform.resolvedExecutable,
-        ['build', 'cli', '--target', 'bin/main.dart', '--output', outDir.path],
-        workingDirectory: pkgDir.path,
-      );
-      expect(build.exitCode, 0, reason: '${build.stdout}\n${build.stderr}');
-
-      final bundle = outDir.uri.resolve('bundle/');
-      final exe = bundle.resolve(
-        'bin/main${Platform.isWindows ? '.exe' : ''}',
-      );
-      final runResult = await Process.run(exe.toFilePath(), []);
-      expect(
-        runResult.exitCode,
-        0,
-        reason: '${runResult.stdout}\n${runResult.stderr}',
-      );
-      expect(runResult.stdout, contains('Result: 42'));
-
-      final bundledDylib = File.fromUri(bundle.resolve('lib/$dylibFileName'));
-      final dylib = DynamicLibrary.open(bundledDylib.path);
-      addTearDown(dylib.close);
-      expect(dylib.providesSymbol('math_add'), isTrue);
+      final dylib = await runBundle(await buildCli(pkgDir));
       expect(
         dylib.providesSymbol('math_unused_multiply'),
         isTrue,
@@ -528,67 +479,49 @@ void main() {
             'Fallback prebuilt dynamic library contains all symbols '
             '(un-treeshaken)',
       );
-
-      // 2b. treeshake: on -> throws when linking fails instead of falling back
-      await writePubspec(buildMode: 'fetch', treeshake: 'on');
-      final onOutDir = await Directory.systemTemp.createTemp(
-        'math_pkg_cli_treeshake_on_',
-      );
-      addTearDown(() => onOutDir.delete(recursive: true));
-
-      final onBuild = await Process.run(
-        Platform.resolvedExecutable,
-        [
-          'build',
-          'cli',
-          '--target',
-          'bin/main.dart',
-          '--output',
-          onOutDir.path,
-        ],
-        workingDirectory: pkgDir.path,
-      );
-      expect(
-        onBuild.exitCode,
-        isNonZero,
-        reason: 'treeshake: on must fail when linking fails',
-      );
     },
   );
 
-  test(
-    'dart run in buildMode: build and buildMode: local works end-to-end',
-    () async {
-      // 1. buildMode: build (compiles from C source in hook/build.dart)
-      await writePubspec(buildMode: 'build');
-      final buildRun = await Process.run(
-        Platform.resolvedExecutable,
-        ['run', 'bin/main.dart'],
-        workingDirectory: pkgDir.path,
-      );
-      expect(
-        buildRun.exitCode,
-        0,
-        reason: '${buildRun.stdout}\n${buildRun.stderr}',
-      );
-      expect(buildRun.stdout, contains('Result: 42'));
+  test('treeshake: on fails when linking fails', () async {
+    final pkgDir = await createPackage(
+      artifactSet: _corruptStatic,
+      buildMode: 'fetch',
+      treeshake: 'on',
+    );
+    final build = await runDart(pkgDir, [
+      'build',
+      'cli',
+      '--target',
+      'bin/main.dart',
+      '--output',
+      pkgDir.uri.resolve('out/').toFilePath(),
+    ]);
+    expect(
+      build.exitCode,
+      isNonZero,
+      reason: 'treeshake: on must fail when linking fails',
+    );
+  });
 
-      // 2. buildMode: local (bundles existing dylib from localPath)
-      final localDylibPath = artifactsDir.uri
-          .resolve(dylibAssetName)
-          .toFilePath();
-      await writePubspec(buildMode: 'local', localPath: localDylibPath);
-      final localRun = await Process.run(
-        Platform.resolvedExecutable,
-        ['run', 'bin/main.dart'],
-        workingDirectory: pkgDir.path,
+  test('dart run in buildMode: build compiles from source', () async {
+    final pkgDir = await createPackage(buildMode: 'build');
+    final result = await runDart(pkgDir, ['run', 'bin/main.dart']);
+    expect(result.exitCode, 0, reason: '${result.stdout}\n${result.stderr}');
+    expect(result.stdout, contains('Result: 42'));
+  });
+
+  test(
+    'dart run in buildMode: local bundles the local dynamic library',
+    () async {
+      final pkgDir = await createPackage(
+        buildMode: 'local',
+        localPath: artifactSetDir(
+          _good,
+        ).uri.resolve(dylibAssetName).toFilePath(),
       );
-      expect(
-        localRun.exitCode,
-        0,
-        reason: '${localRun.stdout}\n${localRun.stderr}',
-      );
-      expect(localRun.stdout, contains('Result: 42'));
+      final result = await runDart(pkgDir, ['run', 'bin/main.dart']);
+      expect(result.exitCode, 0, reason: '${result.stdout}\n${result.stderr}');
+      expect(result.stdout, contains('Result: 42'));
     },
   );
 }
