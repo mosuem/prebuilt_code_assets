@@ -69,12 +69,21 @@ class PrebuiltLibrary {
   /// symbols).
   final Iterable<String>? allKnownSymbols;
 
-  /// Optional callback returning system libraries to link against in [link] for
-  /// a given target [OS].
-  final List<String> Function(OS targetOS)? libraries;
+  /// Optional callback returning the system libraries to link against in
+  /// [link] for the target [CodeConfig] (passed as `-l<name>`, or `<name>.lib`
+  /// for MSVC).
+  ///
+  /// Static libraries don't record their dependencies, so this has to list
+  /// every library that the static library needs and that the linker doesn't
+  /// link by default (such as `ws2_32` on Windows or `m` on Android).
+  final List<String> Function(CodeConfig code)? libraries;
 
-  /// Frameworks to link against in [link] on Apple targets.
-  final List<String> frameworks;
+  /// Optional callback returning the frameworks to link against in [link] for
+  /// the target [CodeConfig] (passed as `-framework <name>`).
+  ///
+  /// Only used when targeting macOS or iOS. If `null`, uses the default of
+  /// `CLinker` in `package:native_toolchain_c` (`Foundation`).
+  final List<String> Function(CodeConfig code)? frameworks;
 
   /// Optimization level passed to `CLinker.library` in [link].
   final OptimizationLevel optimizationLevel;
@@ -91,7 +100,7 @@ class PrebuiltLibrary {
     this.usedSymbols,
     this.allKnownSymbols,
     this.libraries,
-    this.frameworks = const [],
+    this.frameworks,
     this.optimizationLevel = OptimizationLevel.o3,
   });
 
@@ -403,18 +412,35 @@ class PrebuiltLibrary {
       linkerOptions = LinkerOptions.treeshake(symbolsToKeep: symbols);
     }
 
+    final code = input.config.code;
+    final linkLibraries = libraries?.call(code) ?? const <String>[];
+    final linkFrameworks = frameworks?.call(code);
+    final linker = linkFrameworks == null
+        // Omit `frameworks` to keep the default of `CLinker`.
+        ? CLinker.library(
+            name: name,
+            packageName: pkg,
+            assetName: assetName,
+            sources: [staticLibraryFile.toFilePath()],
+            libraries: linkLibraries,
+            optimizationLevel: optimizationLevel,
+            linkerOptions: linkerOptions,
+            linkModePreference: LinkModePreference.dynamic,
+          )
+        : CLinker.library(
+            name: name,
+            packageName: pkg,
+            assetName: assetName,
+            sources: [staticLibraryFile.toFilePath()],
+            libraries: linkLibraries,
+            frameworks: linkFrameworks,
+            optimizationLevel: optimizationLevel,
+            linkerOptions: linkerOptions,
+            linkModePreference: LinkModePreference.dynamic,
+          );
+
     try {
-      await CLinker.library(
-        name: name,
-        packageName: pkg,
-        assetName: assetName,
-        sources: [staticLibraryFile.toFilePath()],
-        libraries: libraries?.call(input.config.code.targetOS) ?? const [],
-        frameworks: frameworks,
-        optimizationLevel: optimizationLevel,
-        linkerOptions: linkerOptions,
-        linkModePreference: LinkModePreference.dynamic,
-      ).run(input: input, output: output, logger: log);
+      await linker.run(input: input, output: output, logger: log);
     } catch (e, s) {
       log.info('$pkg: linking failed: $e\n$s');
       if (buildOptions.treeshake == TreeshakeMode.on) {

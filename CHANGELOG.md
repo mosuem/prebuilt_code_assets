@@ -30,6 +30,12 @@
   default, fails without writing files if any asset can't be hashed (other
   than missing files / HTTP 404; opt out with `failOnError: false`), and
   requires `versionFilePath` to be in the same directory as `hashesFilePath`.
+- **Breaking:** `PrebuiltLibrary.libraries` and `PrebuiltLibrary.frameworks`
+  are now both callbacks taking the target `CodeConfig` (instead of an `OS`
+  and a fixed list, respectively), so frameworks can differ between macOS and
+  iOS and both can depend on the architecture or SDK. A `null` `frameworks`
+  now keeps the `CLinker` default (`Foundation`) instead of linking no
+  frameworks; pass `(_) => const []` for the previous behavior.
 - Fixed `build` routing a static library to the link hook when linking is
   disabled but the link mode preference is static, which fails hook output
   validation.

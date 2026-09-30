@@ -756,6 +756,41 @@ void main() {
         );
         expect(requestedPaths, isEmpty);
       });
+
+      test('passes the CodeConfig to libraries and frameworks', () async {
+        final configs = <String, CodeConfig>{};
+        // Not a valid archive, so linking fails (and `treeshake: on` rethrows)
+        // after the callbacks ran.
+        await File.fromUri(
+          tempDir.uri.resolve('libdemo.a'),
+        ).writeAsString('not-an-archive');
+        final input = createLinkInput(
+          [
+            staticAsset('demo.dart').encode(),
+          ],
+          defines: {'treeshake': 'on'},
+        );
+        final library = PrebuiltLibrary(
+          name: 'demo',
+          assetName: 'demo.dart',
+          libraries: (code) {
+            configs['libraries'] = code;
+            return const ['m'];
+          },
+          frameworks: (code) {
+            configs['frameworks'] = code;
+            return const [];
+          },
+        );
+        await expectLater(
+          library.link(input: input, output: LinkOutputBuilder()),
+          throwsA(anything),
+        );
+        for (final code in [configs['libraries'], configs['frameworks']]) {
+          expect(code?.targetOS, OS.linux);
+          expect(code?.targetArchitecture, Architecture.x64);
+        }
+      });
     });
   });
 
