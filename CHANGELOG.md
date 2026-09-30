@@ -1,5 +1,7 @@
 ## 0.2.0-wip
 
+- **Breaking:** Require Dart 3.13, the first stable SDK in which `dart build`
+  records `@RecordUse` usages by default, which tree-shaking relies on.
 - **Breaking:** Removed the Rust-specific APIs `CargoSourceBuilder`,
   `asRustTarget`, `asRustTargetForConfig`, and
   `PrebuiltReleaseConfig.rustTargets`. They encoded one project's toolchain

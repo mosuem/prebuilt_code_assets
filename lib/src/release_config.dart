@@ -7,22 +7,25 @@ import 'package:code_assets/code_assets.dart';
 import 'targets.dart';
 
 /// Resolves the remote release asset filename for a target and link mode.
-typedef AssetNameResolver =
-    String Function(
-      OS os,
-      Architecture arch, {
-      IOSSdk? iosSdk,
-      required bool static,
-    });
+typedef AssetNameResolver = String Function(
+  OS os,
+  Architecture arch, {
+  IOSSdk? iosSdk,
+  required bool static,
+});
 
 /// Resolves the local OS-specific library filename for [os] and [static].
-typedef LibraryFileNameResolver =
-    String Function(OS os, {required bool static});
+typedef LibraryFileNameResolver = String Function(
+  OS os, {
+  required bool static,
+});
 
 /// Resolves the download [Uri] for a given release [version] and
 /// [assetRemoteName].
-typedef DownloadUriResolver =
-    Uri Function(String version, String assetRemoteName);
+typedef DownloadUriResolver = Uri Function(
+  String version,
+  String assetRemoteName,
+);
 
 /// Configuration for fetching and verifying prebuilt release binaries.
 class PrebuiltReleaseConfig {

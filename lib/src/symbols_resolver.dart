@@ -6,8 +6,9 @@ import 'package:record_use/record_use.dart' as record_use;
 
 /// Extracts the list of native C/Rust symbol names used by the application from
 /// [recordedUses].
-typedef SymbolsResolver =
-    List<String> Function(record_use.Recordings recordedUses);
+typedef SymbolsResolver = List<String> Function(
+  record_use.Recordings recordedUses,
+);
 
 /// Standard [SymbolsResolver] factories for `ffigen` and Diplomat bindings.
 abstract final class SymbolsResolvers {

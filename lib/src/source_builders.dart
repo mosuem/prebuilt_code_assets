@@ -14,13 +14,12 @@ import 'package:hooks/hooks.dart';
 /// Implementations should add the source files they read to
 /// `output.dependencies` so the hook is re-run when they change (see
 /// [findSourceBuildDependencies]).
-typedef SourceBuildCallback =
-    Future<Uri> Function(
-      BuildInput input,
-      BuildOutputBuilder output, {
-      required bool static,
-      Uri? checkoutPath,
-    });
+typedef SourceBuildCallback = Future<Uri> Function(
+  BuildInput input,
+  BuildOutputBuilder output, {
+  required bool static,
+  Uri? checkoutPath,
+});
 
 /// Default file extensions tracked as native source build dependencies.
 const Set<String> defaultNativeSourceExtensions = {
