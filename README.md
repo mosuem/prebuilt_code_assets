@@ -16,6 +16,7 @@ Modeled after `CLibrary` in `package:native_toolchain_c`, a single `PrebuiltLibr
   - `local`: Bundles a pre-existing dynamic library from `localPath`.
 - **Tree-shaking link hook** (`treeshake` under `hooks.user_defines.<package_name>`):
   - Resolves used symbols via `SymbolsResolvers.fromRecordUseMapping` (`ffigen`) or `SymbolsResolvers.fromMethodPrefix` (e.g. Diplomat).
+  - Requires recorded uses, which `dart build` provides by default since Dart 3.13 (the `record-use` experiment). Without them, the link hook keeps all functions.
   - `auto` (default): Tree-shakes when possible. If no static library is released for a target, or if linking fails in `fetch` mode (e.g. no C toolchain for the target), prints a warning and bundles the prebuilt dynamic library instead.
   - `on`: Always tree-shakes, and fails the build if that is not possible.
   - `off`: Never tree-shakes; bundles the dynamic library directly without running the C linker.

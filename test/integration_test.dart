@@ -35,6 +35,19 @@ import 'package:test/test.dart';
 /// single quotes are escaped by doubling them.
 String yamlString(String value) => "'${value.replaceAll("'", "''")}'";
 
+/// Whether `dart build` records `@RecordUse` usages, which the `record-use`
+/// experiment enables by default since Dart 3.13 (and only allows on the
+/// dev and main channels before).
+final bool recordsUses = () {
+  final [major, minor, ...] = Platform.version
+      .split(' ')
+      .first
+      .split(RegExp('[.-]'))
+      .map(int.tryParse)
+      .toList();
+  return major! > 3 || (major == 3 && minor! >= 13);
+}();
+
 // Only the DLL marks functions with `__declspec(dllexport)`. In a static
 // library, the directive makes the linker export (and so keep) the unused
 // functions of an object file that is linked for a used one.
@@ -448,10 +461,11 @@ dependencies:
       final dylib = await runBundle(await buildCli(pkgDir));
       expect(
         dylib.providesSymbol('math_unused_multiply'),
-        isFalse,
-        reason:
-            'Unused symbol math_unused_multiply must be tree-shaken by '
-            'hook/link.dart',
+        !recordsUses,
+        reason: recordsUses
+            ? 'Unused symbol math_unused_multiply must be tree-shaken by '
+                  'hook/link.dart'
+            : 'Without recorded uses, hook/link.dart must keep all functions',
       );
     },
   );
