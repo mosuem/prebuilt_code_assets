@@ -35,9 +35,14 @@ import 'package:test/test.dart';
 /// single quotes are escaped by doubling them.
 String yamlString(String value) => "'${value.replaceAll("'", "''")}'";
 
+// Only the DLL marks functions with `__declspec(dllexport)`. In a static
+// library, the directive makes the linker export (and so keep) the unused
+// functions of an object file that is linked for a used one.
 const _cSource = '''
-#if defined(_WIN32)
+#if defined(_WIN32) && defined(MATH_LIB_DLL)
 #define EXPORT __declspec(dllexport)
+#elif defined(_WIN32)
+#define EXPORT
 #else
 #define EXPORT __attribute__((visibility("default")))
 #endif
@@ -186,6 +191,7 @@ final mathLibrary = PrebuiltLibrary(
       name: 'math_lib',
       assetName: 'math_pkg.dart',
       sources: const ['src/math_lib.c'],
+      defines: {if (!static) 'MATH_LIB_DLL': null},
       linkModePreference: static
           ? LinkModePreference.static
           : LinkModePreference.dynamic,
@@ -339,6 +345,7 @@ dependencies:
           name: 'math_lib',
           assetName: 'math_pkg.dart',
           sources: const ['src/math_lib.c'],
+          defines: {if (!static) 'MATH_LIB_DLL': null},
           linkModePreference: static
               ? LinkModePreference.static
               : LinkModePreference.dynamic,

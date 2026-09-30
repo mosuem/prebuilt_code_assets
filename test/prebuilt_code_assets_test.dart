@@ -681,6 +681,7 @@ void main() {
       LinkInput createLinkInput(
         List<EncodedAsset> assets, {
         Map<String, Object?> defines = const {},
+        CodeAssetExtension? extension,
       }) =>
           (LinkInputBuilder()
                 ..setupShared(
@@ -695,7 +696,7 @@ void main() {
                   assetsFromLinking: const [],
                   recordedUsesFile: null,
                 )
-                ..addExtension(linuxX64()))
+                ..addExtension(extension ?? linuxX64()))
               .build();
 
       CodeAsset staticAsset(String name) => CodeAsset(
@@ -756,6 +757,35 @@ void main() {
         );
         expect(requestedPaths, isEmpty);
       });
+
+      test(
+        'treeshake: auto falls back when the static library cannot be read',
+        () async {
+          // On Windows, reading the symbols of the (invalid) archive fails
+          // before the linker runs.
+          await File.fromUri(
+            tempDir.uri.resolve('libdemo.a'),
+          ).writeAsString('not-an-archive');
+          final dll = makeReleaseConfig(
+            const {},
+          ).resolveAssetName(OS.windows, Architecture.x64, static: false);
+          final input = createLinkInput(
+            [staticAsset('demo.dart').encode()],
+            extension: CodeAssetExtension(
+              targetOS: OS.windows,
+              targetArchitecture: Architecture.x64,
+              linkModePreference: LinkModePreference.dynamic,
+            ),
+          );
+          final output = LinkOutputBuilder();
+          await makeLibrary(
+            makeReleaseConfig({dll: dylibHash}),
+          ).link(input: input, output: output);
+          final asset = LinkOutput(output.json).assets.code.single;
+          expect(asset.linkMode, isA<DynamicLoadingBundled>());
+          expect(requestedPaths, ['/releases/1.0.0/$dll']);
+        },
+      );
 
       test('passes the CodeConfig to libraries and frameworks', () async {
         final configs = <String, CodeConfig>{};

@@ -39,6 +39,9 @@
 - Fixed `build` routing a static library to the link hook when linking is
   disabled but the link mode preference is static, which fails hook output
   validation.
+- Fixed `link` not falling back to the prebuilt dynamic library in
+  `treeshake: auto` mode when reading the symbols of a Windows static library
+  fails.
 - Fixed `link` dropping other assets routed to the package's link hook, and
   matching assets whose ID merely ends with `assetName`.
 - Fixed the default logger mutating the global root logger and adding a new

@@ -399,48 +399,15 @@ class PrebuiltLibrary {
       );
     }
 
-    final LinkerOptions linkerOptions;
-    if (input.config.code.targetOS == OS.windows) {
-      linkerOptions = await createWindowsLinkerOptions(
-        outputDirectory: input.outputDirectory,
-        libraryName: name,
+    try {
+      await _linkStaticLibrary(
+        input,
+        output,
+        pkg: pkg,
         staticLibrary: staticLibraryFile,
         symbols: symbols,
-        allKnownSymbols: allKnownSymbols,
+        log: log,
       );
-    } else {
-      linkerOptions = LinkerOptions.treeshake(symbolsToKeep: symbols);
-    }
-
-    final code = input.config.code;
-    final linkLibraries = libraries?.call(code) ?? const <String>[];
-    final linkFrameworks = frameworks?.call(code);
-    final linker = linkFrameworks == null
-        // Omit `frameworks` to keep the default of `CLinker`.
-        ? CLinker.library(
-            name: name,
-            packageName: pkg,
-            assetName: assetName,
-            sources: [staticLibraryFile.toFilePath()],
-            libraries: linkLibraries,
-            optimizationLevel: optimizationLevel,
-            linkerOptions: linkerOptions,
-            linkModePreference: LinkModePreference.dynamic,
-          )
-        : CLinker.library(
-            name: name,
-            packageName: pkg,
-            assetName: assetName,
-            sources: [staticLibraryFile.toFilePath()],
-            libraries: linkLibraries,
-            frameworks: linkFrameworks,
-            optimizationLevel: optimizationLevel,
-            linkerOptions: linkerOptions,
-            linkModePreference: LinkModePreference.dynamic,
-          );
-
-    try {
-      await linker.run(input: input, output: output, logger: log);
     } catch (e, s) {
       log.info('$pkg: linking failed: $e\n$s');
       if (buildOptions.treeshake == TreeshakeMode.on) {
@@ -462,6 +429,54 @@ class PrebuiltLibrary {
         rethrow;
       }
     }
+  }
+
+  /// Links [staticLibrary] into a dynamic library exporting [symbols] (or all
+  /// functions if `null`).
+  Future<void> _linkStaticLibrary(
+    LinkInput input,
+    LinkOutputBuilder output, {
+    required String pkg,
+    required Uri staticLibrary,
+    required List<String>? symbols,
+    required Logger log,
+  }) async {
+    final code = input.config.code;
+    final linkerOptions = code.targetOS == OS.windows
+        ? await createWindowsLinkerOptions(
+            outputDirectory: input.outputDirectory,
+            libraryName: name,
+            staticLibrary: staticLibrary,
+            symbols: symbols,
+            allKnownSymbols: allKnownSymbols,
+          )
+        : LinkerOptions.treeshake(symbolsToKeep: symbols);
+    final linkLibraries = libraries?.call(code) ?? const <String>[];
+    final linkFrameworks = frameworks?.call(code);
+    final linker = linkFrameworks == null
+        // Omit `frameworks` to keep the default of `CLinker`.
+        ? CLinker.library(
+            name: name,
+            packageName: pkg,
+            assetName: assetName,
+            sources: [staticLibrary.toFilePath()],
+            libraries: linkLibraries,
+            optimizationLevel: optimizationLevel,
+            linkerOptions: linkerOptions,
+            linkModePreference: LinkModePreference.dynamic,
+          )
+        : CLinker.library(
+            name: name,
+            packageName: pkg,
+            assetName: assetName,
+            sources: [staticLibrary.toFilePath()],
+            libraries: linkLibraries,
+            frameworks: linkFrameworks,
+            optimizationLevel: optimizationLevel,
+            linkerOptions: linkerOptions,
+            linkModePreference: LinkModePreference.dynamic,
+          );
+    await linker.run(input: input, output: output, logger: log);
   }
 
   Future<bool> _bundlePrebuiltDynamicLibrary(

@@ -20,6 +20,7 @@ Modeled after `CLibrary` in `package:native_toolchain_c`, a single `PrebuiltLibr
   - `on`: Always tree-shakes, and fails the build if that is not possible.
   - `off`: Never tree-shakes; bundles the dynamic library directly without running the C linker.
   - On Windows, only exports symbols the `.lib` defines, and switches to a `.def` module-definition file when `/INCLUDE:<symbol>` flags would exceed the 32k command-line limit.
+  - On Windows, don't mark functions with `__declspec(dllexport)` when compiling the static library: the linker then exports, and so keeps, every such function in each object file it links, even unused ones. The `.def` file already determines the exports.
   - Any other assets routed to the package's link hook are forwarded unchanged.
 - **Maintainer CLI runners** (`package:prebuilt_code_assets/tools.dart`):
   - `runPrecompileBinariesCli` for `tool/precompile_binaries.dart`.
